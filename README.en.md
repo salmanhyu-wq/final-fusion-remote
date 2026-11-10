@@ -1,5 +1,11 @@
 # Final Fusion 1.0
 
+**I built this for myself.**
+
+The picture quality in Chrome Remote Desktop hurt my eyes, my old MacBook was no longer supported and couldn’t use Apple’s Screen Sharing, and my teenage daughter took the good laptop. So I built a remote desktop app for myself. My first priority was to send the screen from a Mac mini or Mac Studio running without a monitor straight to my old laptop, at the best resolution for its display. I also made sure it supported Mac keyboard shortcuts and trackpad gestures.
+
+I wish you all the best in whatever you do.
+
 **Use a headless Mac mini or Mac Studio from an older laptop, like it was your Mac.** Work with a sharp remote display and familiar Mac shortcuts. If setup or troubleshooting gets stuck, copy the app’s guide into your own AI assistant.
 
 [한국어](README.md) · [Build and test](DEVELOPMENT.md) · [Source terms](LICENSE)
