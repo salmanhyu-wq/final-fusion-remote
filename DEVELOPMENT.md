@@ -40,6 +40,8 @@ The session test checks automatic transfer to older Mac viewers, the 1.0.0 updat
 
 The 1.0.3 session test also simulates a screen saver, a display mode still settling, and a suspended video stream. It checks that a fresh desktop frame starts the full-quality session and that a persistent screen saver leaves remote input available before reconnecting. This test uses simulated screen saver states.
 
+To check 1.0.4 on hardware, disconnect the host monitor, reconnect from a Mac viewer using Full quality, and verify that the received dimensions match the viewer and fill the display. This exercises the virtual primary display path.
+
 ## Find and fix a problem
 
 - **Settings, activity indicators and preview:** `main.swift`, `Design.swift`, `UIPreview.swift`.

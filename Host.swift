@@ -571,7 +571,18 @@ final class StudioHost {
                 let source = content?.displays.first(where: { $0.displayID == main })
                 let bounds = CGDisplayBounds(main)
                 let sourceReady = source.map { CGFloat($0.width) == bounds.width && CGFloat($0.height) == bounds.height } ?? false
-                let nativeReady = self.nativePixels == nil || (sourceReady && self.nativeModeIsReady)
+                let nativeReady = self.nativePixels.map { pixels in
+                    guard sourceReady, self.nativeModeIsReady, let source else { return false }
+                    if self.nativeDisplay?.isStandalone == true {
+                        // In headless mode Quartz may omit the current display mode. Check the real capture scale.
+                        let filter = SCContentFilter(display: source, excludingApplications: [], exceptingWindows: [])
+                        let scale = CGFloat(filter.pointPixelScale)
+                        let width = Int((filter.contentRect.width * scale).rounded())
+                        let height = Int((filter.contentRect.height * scale).rounded())
+                        return pixels.fitsSource(width: width, height: height)
+                    }
+                    return true
+                } ?? true
                 let modeSettling = self.fittedDisplay.map { fit in
                     !sourceReady || !fit.isApplied || fit.id != main
                 } ?? false
@@ -629,8 +640,12 @@ final class StudioHost {
         if let simulation { return simulation.nativeModeReady?() ?? true }
         guard let pixels = nativePixels else { return false }
         let main = CGMainDisplayID()
-        guard (nativeDisplay?.id ?? fittedDisplay?.id) == main, CGDisplayIsActive(main) != 0,
-              nativeDisplay?.isMirrored != false, let mode = CGDisplayCopyDisplayMode(main) else { return false }
+        guard (nativeDisplay?.id ?? fittedDisplay?.id) == main, CGDisplayIsActive(main) != 0 else { return false }
+        if let nativeDisplay {
+            if nativeDisplay.isStandalone { return nativeDisplay.hasExpectedLogicalSize }
+            guard nativeDisplay.isMirrored else { return false }
+        }
+        guard let mode = CGDisplayCopyDisplayMode(main) else { return false }
         return pixels.fitsSource(width: mode.pixelWidth, height: mode.pixelHeight)
     }
 
@@ -1524,6 +1539,22 @@ private final class SessionNativeDisplay {
 
     var isMirrored: Bool { CGDisplayMirrorsDisplay(original) == id }
 
+    var isStandalone: Bool {
+        guard CGMainDisplayID() == id else { return false }
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return false }
+        let capacity = count + 1
+        var displays = [CGDirectDisplayID](repeating: kCGNullDirectDisplay, count: Int(capacity))
+        guard CGGetOnlineDisplayList(capacity, &displays, &count) == .success, count < capacity else { return false }
+        let online = displays.prefix(Int(count))
+        return online.contains(id) && !online.contains(original)
+    }
+
+    var hasExpectedLogicalSize: Bool {
+        let bounds = CGDisplayBounds(id)
+        return bounds.width * 2 == CGFloat(pixels.width) && bounds.height * 2 == CGFloat(pixels.height)
+    }
+
     init?(_ pixels: ReceiverNativePixels) {
         let original = CGMainDisplayID()
         guard original != kCGNullDirectDisplay, CGDisplayIsInMirrorSet(original) == 0 else { return nil }
@@ -1537,7 +1568,9 @@ private final class SessionNativeDisplay {
 
     func activate() -> Bool {
         if isMirrored { return true }
-        guard CGDisplayIsActive(id) != 0, CGDisplayIsOnline(original) != 0,
+        // With no monitor attached, macOS replaces its placeholder with this virtual primary display.
+        if isStandalone { return hasExpectedLogicalSize }
+        guard CGDisplayIsActive(id) != 0, CGDisplayIsOnline(original) == 1,
               CGDisplayIsInMirrorSet(original) == 0,
               let modes = CGDisplayCopyAllDisplayModes(id, [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary)
                   as? [CGDisplayMode],
