@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="studio-keyboard" content="__STUDIO_KEYBOARD__">
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+<title data-i18n="title">파이널 퓨전 받기</title>
+<main>
+ <header>
+  <img src="icon.svg" alt="">
+  <div><strong data-i18n="product">파이널 퓨전</strong><p><span data-i18n="subtitle">멀리 있는 맥을 이 PC에서 그대로 써요</span> · v<span id="version">__STUDIO_VERSION__</span></p></div>
+ </header>
+ <section class="setup" aria-labelledby="heading">
+  <h1 id="heading" data-i18n="heading">보내는 맥에 연결해요</h1>
+  <p data-i18n="lead">보내는 맥에서 ‘보내기 시작’을 누른 뒤 연결하세요. 첫 연결 때는 6자리 번호가 나와요.</p>
+  <div class="connection">
+   <div id="state" class="state" data-tone="idle">
+    <span class="state-mark" aria-hidden="true"></span>
+    <p id="status" role="status" data-i18n="ready">준비됐어요.</p>
+   </div>
+   <div class="buttons connection-actions">
+    <button id="connect" class="primary" data-i18n="connect">연결하기</button>
+    <button id="disconnect" disabled data-i18n="disconnect">연결 끊기</button>
+   </div>
+  </div>
+  <div class="options">
+   <label class="field"><span data-i18n="quality">화질</span>
+    <select id="quality"><option value="0" data-i18n="low">낮음</option><option value="1" selected data-i18n="medium">중간</option><option value="2" data-i18n="high">높음</option></select>
+   </label>
+   <label><input type="checkbox" id="sendDiagnostics" checked> <span data-i18n="diagnostics">연결 상태를 보내는 맥에 알려 주기</span></label>
+   <label class="field"><span data-i18n="keyboard">키보드</span>
+    <select id="keyboard"><option value="auto">자동</option><option value="mac" data-i18n="kbMac">맥 키보드 (⌘ = Windows 키 자리)</option><option value="pc" data-i18n="kbPc">Windows 키보드 (맥 배열 순서)</option></select>
+   </label>
+   <label><input type="checkbox" id="remoteTuning"> <span data-i18n="tuning">보내는 맥이 화질을 바꿀 수 있게 허용</span></label>
+  </div>
+  <p class="note" id="keyboardTip"></p>
+  <p class="note" data-i18n="fullscreenTip">‘전체 화면’에서는 Windows 키·Alt+Tab 같은 시스템 키도 맥으로 보내요. 전체 화면에서 나가려면 Esc를 길게 누르세요.</p>
+  <details id="setup"><summary data-i18n="trouble">연결이 안 되나요?</summary>
+   <p data-i18n="speed">권장 인터넷 속도는 내려받기 25 Mbps, 올리기 2 Mbps예요.</p>
+   <p data-i18n-html="help">인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴본 뒤 <b>연결하기</b>를 누르세요. 처음 연결할 때는 여기 나온 6자리 번호를 보내는 맥에 입력하세요.</p>
+   <div class="buttons"><button id="agent" data-i18n="agent">AI 도우미 안내 복사</button></div>
+  </details>
+ </section>
+ <section id="screens" aria-label="공유 모니터" data-i18n-label="screens"></section>
+ <a class="promo" href="https://mymusicgacha.com" target="_blank" rel="noopener">
+  <img src="patch.png" alt="" width="56" height="56">
+  <span class="promo-words"><strong>MY MUSIC <em>GACHA</em></strong><span data-i18n="promo">내 이야기를 노래로 · 두 가지 버전으로 받아 보세요</span></span>
+  <span class="promo-pill" data-i18n="promoCta">노래 만들기 →</span>
+ </a>
+ <footer><button id="exit" data-i18n="exit">앱 닫기</button></footer>
+</main>
+<script src="viewer.js" defer></script>
+</html>

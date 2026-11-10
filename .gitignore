@@ -1,0 +1,26 @@
+.DS_Store
+.build/
+*.app/
+*.zip
+*.dmg
+*.exe
+Receiver.json
+.dev.vars
+.dev.vars.*
+.wrangler/
+Link/bench/rust/target/
+
+# Per-user settings and diagnostic artifacts
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.log
+*.plist.local
+host-state.json
+host-status.json
+receiver-diagnostics.json
+relay.json
+Updates/

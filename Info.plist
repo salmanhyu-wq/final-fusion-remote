@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>StudioRemote</string>
+    <key>CFBundleIdentifier</key><string>app.finalfusion.remote</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleName</key><string>파이널 퓨전</string>
+    <key>CFBundleDisplayName</key><string>파이널 퓨전</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0.0</string>
+    <key>CFBundleVersion</key><string>30</string>
+    <key>FinalFusionSource</key><string>https://github.com/salmanhyu-wq/final-fusion-remote</string>
+    <key>CFBundleIconFile</key><string>StudioRemote.icns</string>
+    <key>NSLocalNetworkUsageDescription</key><string>허용된 기기끼리 화면을 연결해요.</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict>
+</plist>
