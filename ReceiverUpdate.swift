@@ -2,6 +2,7 @@ import AppKit
 import CoreServices
 import CryptoKit
 import MachO
+import Security
 
 enum ReceiverUpdatePhase: UInt32 {
     case version = 1, offer, chunk, complete, result, request
@@ -157,6 +158,10 @@ struct ReceiverUpdateInstall {
         }
 
         try run("/usr/bin/codesign", ["--verify", "--strict", "--deep", candidate.path])
+        guard matchesInstalledSignature(candidate, installed: application) else {
+            throw StudioError.message(L("설치된 앱과 업데이트의 서명이 달라요.",
+                                        "The update signature doesn't match the installed viewer."))
+        }
         guard application.pathExtension == "app",
               allowed.contains(where: { $0.resolvingSymlinksInPath().path == parent.path }),
               fm.isWritableFile(atPath: parent.path),
@@ -185,6 +190,25 @@ struct ReceiverUpdateInstall {
             try? fm.removeItem(at: staging)
             throw error
         }
+    }
+
+    private static func matchesInstalledSignature(_ candidate: URL, installed: URL) -> Bool {
+        let flags = SecCSFlags(rawValue: 0)
+        var installedCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecStaticCodeCreateWithPath(installed as CFURL, flags, &installedCode) == errSecSuccess,
+              let installedCode,
+              SecCodeCopySigningInformation(installedCode, SecCSFlags(rawValue: UInt32(kSecCSSigningInformation)), &info) == errSecSuccess,
+              let signingInfo = info as? [String: Any] else { return false }
+        // Ad-hoc builds rely on the pinned host and verified update profile.
+        guard let certificates = signingInfo[kSecCodeInfoCertificates as String] as? [SecCertificate],
+              !certificates.isEmpty else { return true }
+        var requirement: SecRequirement?
+        var candidateCode: SecStaticCode?
+        return SecCodeCopyDesignatedRequirement(installedCode, flags, &requirement) == errSecSuccess &&
+            requirement != nil &&
+            SecStaticCodeCreateWithPath(candidate as CFURL, flags, &candidateCode) == errSecSuccess &&
+            candidateCode.map { SecStaticCodeCheckValidity($0, flags, requirement) == errSecSuccess } == true
     }
 
     private static func run(_ command: String, _ arguments: [String]) throws {

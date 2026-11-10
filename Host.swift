@@ -27,6 +27,7 @@ final class StudioHost {
         let displays: (Wire, ReceiverDisplayOptions?) throws -> [Capture]
         let onInput: (Input) -> Void
         var displayReady: (() -> Bool)? = nil
+        var updatePayload: (() throws -> Data)? = nil
     }
 
     private let simulation: Simulation?
@@ -34,10 +35,11 @@ final class StudioHost {
     private var peer: Wire?
     private var authorized = false
     private var updateOnly = false
-    var receiverProfile: ReceiverProfile?
+    var receiverProfile: ReceiverProfile? {
+        didSet { sendUpdateIfNeeded() }
+    }
     private var streams: [Capture] = []
     var activeDisplayCount: Int { streams.count }
-    var hasRequestedUpdate: Bool { requestedReceiverUpdate != nil }
     private var timer: DispatchSourceTimer?
     private var lastSeen = Date()
     private var lastReport: Date?
@@ -46,7 +48,8 @@ final class StudioHost {
     private var receiverTuning: ReceiverTuningStatus?
     private var lastReceiverRequest: UUID?
     private var receiverVersion: ReceiverUpdateVersion?
-    private var requestedReceiverUpdate: ReceiverProfile?
+    private var updateAttempted = false
+    private var updateDownloadRequested = false
     private var updateDelivered = false
     private var updateTimer: DispatchSourceTimer?
     private var updatePending = false {
@@ -56,6 +59,7 @@ final class StudioHost {
     }
     var onUpdateActivity: ((OperationActivity) -> Void)?
     var onUpdateStatus: ((String) -> Void)?
+    var onReceiverVersion: ((ReceiverUpdateVersion) -> Void)?
 
     private func updateStatus(_ message: String) { (onUpdateStatus ?? status)(message) }
     private var fittedDisplay: MatchedDisplay?
@@ -103,7 +107,6 @@ final class StudioHost {
     func stop() {
         listener?.cancel()
         listener = nil
-        requestedReceiverUpdate = nil
         if let wire = peer {
             clean(wire)
             wire.close()
@@ -120,6 +123,8 @@ final class StudioHost {
         let wire = Wire(conn, queue: .main)
         peer = wire
         authorized = false
+        updateAttempted = false
+        updateDownloadRequested = false
         updateDelivered = false
         lastSeen = Date()
         wire.onMessage = { [weak self, weak wire] kind, screen, data in
@@ -128,12 +133,12 @@ final class StudioHost {
         }
         wire.onEnd = { [weak self, weak wire] reason in
             guard let self = self, let wire = wire else { return }
+            let wasUpdating = self.updatePending
             self.clean(wire)
-            guard self.listener != nil, !self.updateDelivered else { return }
-            if self.requestedReceiverUpdate != nil {
-                self.updateStatus(L("받는 기기가 다시 연결되면 업데이트를 보내요.", "The update will be sent when the viewer reconnects."))
-            } else {
-                self.status(L("받는 기기 연결 대기 중 · \(reason)", "Waiting for a viewer · \(reason)"))
+            guard self.listener != nil else { return }
+            self.status(L("받는 기기 연결 대기 중 · \(reason)", "Waiting for a viewer · \(reason)"))
+            if wasUpdating {
+                self.updateStatus(L("받는 맥이 다시 연결되면 업데이트를 보내요.", "The update will be sent when the viewer reconnects."))
             }
         }
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -164,7 +169,7 @@ final class StudioHost {
         receiverTuning = nil
         lastReceiverRequest = nil
         receiverVersion = nil
-        stopUpdate(keepRequest: true)
+        stopUpdate()
         timer?.cancel()
         timer = nil
         cursorTimer?.cancel()
@@ -238,22 +243,27 @@ final class StudioHost {
             guard updateOnly || streams.contains(where: { $0.info.receiverUpdates == true }) else { return }
             switch ReceiverUpdatePhase(rawValue: screen) {
             case .version:
-                if data.count <= 23 {
-                    receiverVersion = ReceiverUpdateVersion(String(decoding: data, as: UTF8.self))
-                    if !updateOnly { sendRequestedUpdate() }
-                }
+                guard receiverVersion == nil, data.count <= 23,
+                      let version = ReceiverUpdateVersion(String(decoding: data, as: UTF8.self)) else { return }
+                receiverVersion = version
+                onReceiverVersion?(version)
+                sendUpdateIfNeeded()
             case .request:
-                guard updateOnly, data.isEmpty, let profile = receiverProfile else { return }
-                sendReceiverUpdate(profile)
+                guard updateOnly, data.isEmpty, !updatePending, !updateDelivered else { return }
+                updateDownloadRequested = true
+                updateAttempted = false
+                sendUpdateIfNeeded()
             case .result:
                 guard updatePending else { return }
                 if data == Data([1]) {
                     updateDelivered = true
                     stopUpdate()
-                    updateStatus(L("받는 기기에 새 앱을 보냈어요. 그 기기에서 ‘설치’를 누르세요.", "Sent the new app to the viewer. Click “Install” on that device."))
+                    updateStatus(L("파일을 보냈어요. 받는 맥이 새 버전으로 연결되면 설치를 확인해요.",
+                                   "Update sent. Installation is confirmed when the viewer reconnects with the new version."))
                 } else if data == Data([0]) {
                     stopUpdate()
-                    updateStatus(L("받는 기기가 새 앱을 확인하지 못했어요. 다시 보내 주세요.", "The viewer couldn't verify the new app. Please send it again."))
+                    updateStatus(L("받는 맥이 파일을 확인하지 못했어요. 다시 연결하면 업데이트를 보내요.",
+                                   "The viewer couldn't verify the file. The update will be sent when it reconnects."))
                 }
             default: break
             }
@@ -276,27 +286,39 @@ final class StudioHost {
         }
     }
 
-    func sendReceiverUpdate(_ profile: ReceiverProfile) {
-        guard !updatePending else { return }
-        requestedReceiverUpdate = profile
-        if receiverVersion == nil {
-            updateStatus(L("받는 기기가 연결되면 업데이트를 보내요.", "The update will be sent when a viewer connects."))
-        }
-        sendRequestedUpdate()
-    }
-
-    private func sendRequestedUpdate() {
-        guard !updatePending, let profile = requestedReceiverUpdate, let wire = peer, authorized,
-              let receiverVersion = receiverVersion, let version = ReceiverUpdateVersion.current else { return }
-        guard version > receiverVersion else {
-            stopUpdate()
-            updateStatus(L("받는 기기가 이미 최신 버전이에요.", "The viewer is already up to date."))
+    func sendReceiverUpdate() {
+        guard !updatePending, !updateDelivered else { return }
+        guard let receiverVersion, let version = ReceiverUpdateVersion.current else {
+            updateStatus(L("받는 맥이 연결되면 버전을 확인하고 업데이트를 보내요.",
+                           "When the viewer connects, its version is checked and the update is sent if needed."))
             return
         }
+        guard receiverVersion < version else {
+            onReceiverVersion?(receiverVersion)
+            updateStatus(L("받는 맥이 이미 최신 버전이에요.", "The viewer is already up to date."))
+            return
+        }
+        if updateOnly && !updateDownloadRequested {
+            updateStatus(L("받는 맥에서 업데이트를 받기 시작하면 보내요.", "The update will be sent when the viewer starts the download."))
+            return
+        }
+        updateAttempted = false
+        sendUpdateIfNeeded()
+    }
+
+    private func sendUpdateIfNeeded() {
+        guard !updateAttempted, !updatePending, !updateDelivered, !updateOnly || updateDownloadRequested,
+              let profile = receiverProfile, let wire = peer, authorized,
+              let receiverVersion, let version = ReceiverUpdateVersion.current, receiverVersion < version else { return }
+        updateAttempted = true
         updatePending = true
         updateStatus(L("받는 기기에 보낼 업데이트를 준비하고 있어요…", "Preparing the update for the viewer…"))
+        let makeTestPayload = simulation?.updatePayload
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak wire] in
-            let package = Result { try ReceiverUpdateOffer.package(profile) }
+            let package = Result {
+                if let makeTestPayload { return try makeTestPayload() }
+                return try ReceiverUpdateOffer.package(profile)
+            }
             DispatchQueue.main.async {
                 guard let self = self, let wire = wire, self.peer === wire, self.updatePending else { return }
                 switch package {
@@ -324,18 +346,19 @@ final class StudioHost {
         var offset = 0
         var lastPercent = -1
         var lastProgress = Date()
-        timer.schedule(deadline: .now() + .milliseconds(200), repeating: .milliseconds(100))
+        timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(50))
         timer.setEventHandler { [weak self, weak wire] in
             guard let self = self, let wire = wire, self.peer === wire else { return }
             let sentAll = offset > payload.count
             if Date().timeIntervalSince(lastProgress) > (sentAll ? 60 : 35) {
                 self.stopUpdate()
-                self.updateStatus(L("업데이트 전송이 늦어지고 있어요. 다시 보내 주세요.", "Sending the update is taking too long. Please send it again."))
+                self.updateStatus(L("업데이트 전송이 늦어지고 있어요. 받는 맥이 다시 연결되면 보내요.",
+                                        "The update timed out. It will be sent when the viewer reconnects."))
                 return
             }
-            guard !sentAll, wire.hasVideoRoom(maxPending: 32 * 1024) else { return }
+            guard !sentAll, wire.hasVideoRoom(maxPending: 64 * 1024) else { return }
             if offset < payload.count {
-                let end = min(payload.count, offset + 12 * 1024)
+                let end = min(payload.count, offset + ReceiverUpdateOffer.chunkSize)
                 if wire.send(.receiverUpdate, screen: ReceiverUpdatePhase.chunk.rawValue, data: payload.subdata(in: offset..<end)) {
                     offset = end
                     let percent = offset * 100 / payload.count
@@ -354,12 +377,11 @@ final class StudioHost {
         timer.resume()
     }
 
-    private func stopUpdate(keepRequest: Bool = false) {
+    private func stopUpdate() {
         updateTimer?.cancel()
         updateTimer = nil
         updatePending = false
         for stream in streams { stream.pauseForUpdate(false) }
-        if !keepRequest { requestedReceiverUpdate = nil }
     }
 
     private func refreshStreamMode() {
@@ -515,13 +537,12 @@ final class StudioHost {
                     guard let content = content else {
                         throw error ?? StudioError.message(L("공유할 화면을 찾을 수 없어요.", "Couldn't find a screen to share."))
                     }
-                    let excluded = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
                     let primary = content.displays.filter { $0.displayID == main }
                     // The primary view needs the full receiving screen to stay pixel-for-pixel.
                     let ordered = self.nativePixels != nil ? primary :
                         primary + content.displays.filter { $0.displayID != main }
                     let captures = try ordered.prefix(8).enumerated().map { index, display in
-                        try Capture(display: display, index: index, excluded: excluded, retina: retina, wire: wire,
+                        try Capture(display: display, index: index, retina: retina, wire: wire,
                                     interactive: options?.localCursor == true, koreanCaps: self.control.supportsKoreanCaps,
                                     followsReceiver: self.fittedDisplay?.id == display.displayID ||
                                         self.nativeDisplay?.id == display.displayID,
@@ -708,10 +729,11 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    convenience init(display: SCDisplay, index: Int, excluded: [SCRunningApplication], retina: Bool, wire: Wire,
+    convenience init(display: SCDisplay, index: Int, retina: Bool, wire: Wire,
          interactive: Bool, koreanCaps: Bool, followsReceiver: Bool,
          nativePixels: ReceiverNativePixels? = nil) throws {
-        let filter = SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: [])
+        // The viewer can open and use the host's own settings window.
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let logical = CGDisplayBounds(display.displayID).size
         guard logical.width >= 2, logical.height >= 2 else { throw StudioError.message(L("화면 크기를 읽지 못했어요.", "Couldn't read the screen size.")) }
         let source = filter.contentRect.isEmpty ? logical : filter.contentRect.size

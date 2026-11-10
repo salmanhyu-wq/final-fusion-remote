@@ -173,7 +173,7 @@ enum AgentGuide {
         2. 코드를 고쳐야 하면 소스를 받아(git clone 또는 git pull) AGENTS.md·DEVELOPMENT.md를 먼저 읽어. 고친 뒤 Info.plist의 CFBundleShortVersionString(세 자리)과 CFBundleVersion을 올리고, build.sh로 임시 폴더에 빌드해서 --self-test, --test-session <png>, --test-export <폴더>, Link 폴더의 go test를 통과시켜.
         3. 설치 전에 무엇을 바꿨는지 보여 주고 확인받아. 지금 앱을 복구용으로 복사해 두고, osascript -e 'quit app id "app.finalfusion.remote"' 로 정상 종료한 뒤 새 앱으로 바꿔 열어.
         4. 키체인에 「Final Fusion Signing」 코드 서명 인증서가 있으면 build.sh가 그걸로 서명해서 macOS 권한이 그대로 유지돼(--support-report의 screenRecording·accessibility가 true인지 확인). 인증서가 없는 개발용 서명이면 화면 녹화·손쉬운 사용을 다시 허용해야 해. 사용자에게 파이널 퓨전 창의 「설정 열기」에서 －로 지우고 ＋로 다시 추가하라고 안내하고, --support-report의 sharing이 true가 될 때까지 기다려.
-        5. 받는 맥에는 \(executable) --send-receiver-update 로 새 받는 앱을 밀어 보내(받는 쪽은 「설치」만 누르면 돼). Windows 받는 쪽은 --export-receivers로 새 .exe를 만들어 ② 단계처럼 링크로 보내.
+        5. 받는 맥에는 \(executable) --send-receiver-update 로 DIY 업데이트를 요청해. 구버전 받는 앱에서는 첫 설치 확인이 필요할 수 있고, 새 받는 앱은 파일을 확인한 뒤 자동 설치해. Windows 받는 쪽은 --export-receivers로 새 .exe를 만들어 ② 단계처럼 링크로 보내.
         6. --receiver-report의 receiverAppVersion이 새 버전이면 끝이야. 바꾼 내용과 확인 결과를 짧게 알려 줘.
 
         지킬 것: 번들 ID(app.finalfusion.remote, app.finalfusion.remote.receiver), 설정 폴더, 업데이트 디스크 안의 「Studio Receiver.app」 이름은 바꾸지 마. 중계 비밀과 기기 키를 출력하거나 올리지 마. 지우거나 덮어쓰기 전에 복구본을 만들어.
@@ -194,7 +194,7 @@ enum AgentGuide {
         2. If code must change, get the source (git clone or git pull) and read AGENTS.md and DEVELOPMENT.md first. After the change, raise CFBundleShortVersionString (three numbers) and CFBundleVersion in Info.plist, build with build.sh into a temporary folder, and pass --self-test, --test-session <png>, --test-export <folder> and go test in the Link folder.
         3. Before installing, show what changed and get approval. Copy the current app as a backup, quit it cleanly with osascript -e 'quit app id "app.finalfusion.remote"', replace it with the new app and open it.
         4. If the keychain has the “Final Fusion Signing” code signing certificate, build.sh signs with it and macOS permissions stay (check that screenRecording and accessibility are true in --support-report). With plain development signing, Screen Recording and Accessibility must be allowed again. Tell the user to use “Open settings” in the Final Fusion window, remove the entry with − and add it again with +, and wait until --support-report shows sharing as true.
-        5. Push the new viewer to Mac viewers with \(executable) --send-receiver-update (the viewer only clicks “Install”). For Windows viewers, make a new .exe with --export-receivers and send a link as in step ②.
+        5. Use \(executable) --send-receiver-update to request a DIY update for Mac viewers. Older viewers may show an install prompt once. Newer viewers verify and install the update automatically. For Windows viewers, make a new .exe with --export-receivers and send a link as in step ②.
         6. You're done when receiverAppVersion in --receiver-report shows the new version. Briefly report what changed and how you checked it.
 
         Rules: keep the bundle IDs (app.finalfusion.remote, app.finalfusion.remote.receiver), the settings folder and the “Studio Receiver.app” name inside update disks. Never print or upload the relay secret or device keys. Make a backup before deleting or overwriting anything.

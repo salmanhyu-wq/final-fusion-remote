@@ -376,8 +376,8 @@ func runSelfTests() -> Never {
     ]))
     check(!shared.contains(marker) && shared.contains("2560") && shared.contains("direct") &&
           shared.contains("roundTripMS") && shared.contains("screenRecording"), "shareable diagnostics retain only safe fields")
-    check(ReceiverUpdateVersion.current.map { $0 > ReceiverUpdateVersion("0.9.9")! } == true,
-          "1.0.0 can update the previous private viewer")
+    check(ReceiverUpdateVersion.current.map { $0 > ReceiverUpdateVersion("1.0.0")! } == true,
+          "the new build can update the previous viewer")
     print("PASS: screen fitting, input events, update validation, pairing, transport, cursor shapes, system shortcut mode and agent guides")
     exit(0)
 }

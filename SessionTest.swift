@@ -40,12 +40,13 @@ func runSessionTest(output: URL) -> Never {
     var displayChecks = 0
     var started = false
     var inputs: [Input] = []
+    let updatePayload = Data(repeating: 0x51, count: 70_000)
     let simulation = StudioHost.Simulation(displays: { wire, receiverOptions in
         require(receiverOptions?.width == 1440 && receiverOptions?.height == 900, "receiver sent medium 16:10 dimensions")
         prepared += 1
         senderWire = wire
         let info = DisplayInfo(id: 1, name: "MacBook test pattern", width: options.width, height: options.height,
-                               localCursor: true, followsReceiver: true, macInputMatching: true,
+                               localCursor: true, followsReceiver: true, macInputMatching: true, receiverUpdates: true,
                                logicalWidth: options.width, logicalHeight: options.height, advancedTrackpad: true,
                                notificationShortcut: true, videoFeedback: true, clipboardScreenshots: true,
                                cursorShapes: true)
@@ -55,7 +56,7 @@ func runSessionTest(output: URL) -> Never {
     }, onInput: { inputs.append($0) }, displayReady: {
         displayChecks += 1
         return displayReady
-    })
+    }, updatePayload: { updatePayload })
     let host = try! StudioHost(simulation: simulation) { status in
         if status.hasPrefix(L("원격 연결 중", "Connected remotely")) {
             started = true
@@ -476,6 +477,72 @@ func runSessionTest(output: URL) -> Never {
             "version query returns the sender version and does not start screen capture")
     checker.stop()
     require(displayChecks == 2, "version-only session does not check or wake the display")
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+    host.receiverProfile = ReceiverProfile(relay: "https://example.invalid",
+                                           room: String(repeating: "11", count: 32),
+                                           pin: String(repeating: "22", count: 32),
+                                           invitation: String(repeating: "33", count: 16), macPin: nil)
+    let installed = ReceiverUpdateVersion.current!
+    let older = ReceiverUpdateVersion("1.0.0")!
+    require(older < installed, "test viewer reports the released older version")
+
+    func checkDIYTransfer(version: ReceiverUpdateVersion, checkOnly: Bool, sendsUpdate: Bool) {
+        var announcedVersion: ReceiverUpdateVersion?
+        host.onReceiverVersion = { announcedVersion = $0 }
+        var received = false
+        var download: ReceiverUpdateDownload?
+        var acknowledged = false
+        host.onUpdateStatus = { message in
+            if message.hasPrefix(L("파일을 보냈어요.", "Update sent.")) { acknowledged = true }
+        }
+        let connection = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+        var greeting = host.code
+        greeting.append(checkOnly ? ReceiverUpdatePhase.checkOnlyGreeting : 0)
+        if !checkOnly { greeting.append(options.bytes) }
+        connection.onReady = { [weak connection] in connection?.send(.hello, data: greeting) }
+        connection.onMessage = { [weak connection] kind, id, data in
+            if kind == .screens || (kind == .receiverUpdate && id == ReceiverUpdatePhase.version.rawValue) {
+                connection?.send(.receiverUpdate, screen: ReceiverUpdatePhase.version.rawValue, data: Data(version.label.utf8))
+            }
+            guard kind == .receiverUpdate, let phase = ReceiverUpdatePhase(rawValue: id) else { return }
+            switch phase {
+            case .offer:
+                let offer = try! JSONDecoder().decode(ReceiverUpdateOffer.self, from: data)
+                require(offer.isNewer(than: version), "sender offers only a newer build")
+                download = ReceiverUpdateDownload(offer: offer)
+            case .chunk:
+                require(download?.append(data) == true, "legacy viewer accepts each update chunk")
+            case .complete:
+                require(download?.payload == updatePayload && download?.offer.matches(updatePayload) == true,
+                        "viewer received the complete, verifiable update")
+                received = true
+                connection?.send(.receiverUpdate, screen: ReceiverUpdatePhase.result.rawValue, data: Data([1]))
+            default: break
+            }
+        }
+        connection.start()
+        waitFor("viewer version arrives through the protocol") { announcedVersion == version }
+        if checkOnly || !sendsUpdate {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            require(download == nil, "no unsolicited file during a legacy version check or when already up to date")
+        }
+        if checkOnly && sendsUpdate {
+            connection.send(.receiverUpdate, screen: ReceiverUpdatePhase.request.rawValue)
+        }
+        if sendsUpdate {
+            waitFor("sender transfers the file and acknowledges receipt") { received && acknowledged }
+        }
+        connection.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        waitFor("DIY connection releases any captures") { host.activeDisplayCount == 0 }
+    }
+    checkDIYTransfer(version: older, checkOnly: false, sendsUpdate: true)
+    checkDIYTransfer(version: older, checkOnly: true, sendsUpdate: true)
+    checkDIYTransfer(version: installed, checkOnly: false, sendsUpdate: false)
+    host.onReceiverVersion = nil
+    host.onUpdateStatus = nil
+    print("PASS: older viewers get the update automatically or by legacy request until they report the installed version")
     host.stop()
     print("PASS: idle and update-only sessions leave display power alone, and an authorized receiver starts after display wake")
     print("PASS: no capture at idle, full-screen borders and bottom controls, cursor shape, eleven gesture actions, repaired keyboard shortcut, ⌘+Space and ⌘+Tab, encoder stopped")

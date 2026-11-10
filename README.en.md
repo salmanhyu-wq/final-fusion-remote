@@ -6,7 +6,7 @@ The picture quality in Chrome Remote Desktop hurt my eyes, my old MacBook was no
 
 I wish you all the best in whatever you do.
 
-**[Download the Mac installer](https://github.com/salmanhyu-wq/final-fusion-remote/releases/download/v1.0.0/Final-Fusion-1.0.0-macOS.dmg)** · macOS 14 or later
+**[Download the Mac installer · 1.0.2](https://github.com/salmanhyu-wq/final-fusion-remote/releases/download/v1.0.2/Final-Fusion-1.0.2-macOS.dmg)** · macOS 14 or later
 
 **Use a headless Mac mini or Mac Studio from an older laptop, like it was your Mac.** Work with a sharp remote display and familiar Mac shortcuts. If setup or troubleshooting gets stuck, copy the app’s guide into your own AI assistant.
 
@@ -18,6 +18,10 @@ I wish you all the best in whatever you do.
 4. Click **Connect** on the viewer and approve its six-digit code on the host. Enable shortcut permissions on a Mac viewer to use system shortcuts remotely.
 
 A direct connection can match the Mac viewer’s pixel dimensions when available. Otherwise it falls back to High quality. Your own relay is available when direct connection cannot be used.
+
+You can open Final Fusion on the host Mac and change its settings while connected. To disconnect the viewer, press **Fn + Control + Option + Command + F12** on the Mac viewer. On Windows, hold **Esc** to leave full screen, then click **Disconnect**. **Stop sharing** on the host turns off screen sharing. To turn it back on, you need a backup remote app or physical access to the host Mac.
+
+After you update the host, it offers a **DIY update** to older Mac viewers when they connect. From 1.0.2 onward, the viewer installs later updates automatically. The 1.0.0 viewer needs one click on **Install** to upgrade this time. To update a Windows viewer, create a new one on the host and copy it to that PC.
 
 The host targets macOS 14 or later. The universal Mac viewer targets macOS 11 or later. An earlier version was tested on an Intel MacBook at 2560×1600. The 1.0 checks are local simulations and builds; Apple Silicon Mac viewers and Windows laptops have not been tested on physical receiver hardware. The Windows build targets 64-bit Windows 10 or later with Edge or Chrome; full-screen system keys still need physical testing. Windows and Mac clipboard sharing is unavailable.
 

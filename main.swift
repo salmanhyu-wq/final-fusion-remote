@@ -59,7 +59,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private let startHost = ActionButton(.primary)
     private let endHost = ActionButton()
     private let exportApps = ActionButton()
-    private let sendUpdate = ActionButton()
+    private let sendUpdates = [ActionButton(), ActionButton()]
+    private var updateStatusMessage = ""
     private let installUpdate = ActionButton()
     private let checkUpdate = ActionButton()
     private var receivedUpdate: (URL, ReceiverUpdateOffer)?
@@ -71,14 +72,16 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private let pageSwitch = NSSegmentedControl()
     private var pages: [NSView] = []
     private let root = NSStackView()
-    private var updateRequestedBeforeReady = FileManager.default.fileExists(atPath: StudioApp.updateRequestURL.path)
+    private var updateRequestedByUser = FileManager.default.fileExists(atPath: StudioApp.updateRequestURL.path)
+    private lazy var lastViewerVersion = UserDefaults.standard.string(forKey: "LastDIYViewerVersion")
+        .flatMap(ReceiverUpdateVersion.init) ?? LocalSetup.readReport()?.receiverAppVersion.flatMap(ReceiverUpdateVersion.init)
     private let screenPermission = NSTextField(labelWithString: "")
     private let accessPermission = NSTextField(labelWithString: "")
     private let openScreenSettings = ActionButton()
     private let openAccessSettings = ActionButton()
     private let reopenApp = ActionButton()
     private let permissionBox = NSStackView()
-    private let updateNote = NSTextField(wrappingLabelWithString: "")
+    private let updateNotes = (0..<2).map { _ in NSTextField(wrappingLabelWithString: "") }
     private var permissionsGranted: (screen: Bool, access: Bool)?
     private enum SettingsMode: Int { case agent = 0, manual = 1 }
     private let modeSwitch = NSSegmentedControl()
@@ -106,10 +109,10 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     static let exportRequest = Notification.Name("app.finalfusion.remote.export-receivers")
     private var statusTimer: Timer?
     private var writtenHostStatus: Data?
-    /// Posted by `--send-receiver-update`; the running sender then acts as if ‘Send update’ was clicked.
+    /// Posted by `--send-receiver-update`; the running sender then acts as if ‘Send DIY update’ was clicked.
     static let updateRequest = Notification.Name("app.finalfusion.remote.send-receiver-update")
     static let hostStatusURL = LocalSetup.home.appendingPathComponent("host-status.json")
-    /// Keeps a `--send-receiver-update` request across the relaunch that Screen Recording needs.
+    /// Keeps an explicit send request across relaunches until a viewer reports the new version.
     static let updateRequestURL = LocalSetup.home.appendingPathComponent("send-update-requested")
 
     private static let approvalIdle = L("새 기기가 연결하면, 그 기기에 나온 6자리 번호를 여기에 입력해요.",
@@ -415,7 +418,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         disconnect.isEnabled = false
         endHost.isEnabled = false
         exportApps.isEnabled = false
-        sendUpdate.isEnabled = false
+        sendUpdates.forEach { $0.isEnabled = false }
         installUpdate.isHidden = true
         allow.isEnabled = false
         deny.isEnabled = false
@@ -477,10 +480,11 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         }
         loginStatus.widthAnchor.constraint(equalToConstant: 564).isActive = true
         loginStatus.isHidden = loginStatus.stringValue.isEmpty
-        updateNote.font = .systemFont(ofSize: 13, weight: .medium)
-        updateNote.textColor = Palette.brand
-        updateNote.widthAnchor.constraint(equalToConstant: 564).isActive = true
-        updateNote.isHidden = true
+        for note in updateNotes {
+            note.font = .systemFont(ofSize: 13, weight: .medium)
+            note.textColor = Palette.brand
+            note.isHidden = true
+        }
 
         // The settings scroll when the window would be taller than the screen (first run on a small display).
         let scroll = NSScrollView()
@@ -543,7 +547,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         column(sharingControls, [
             sharingLine,
             row([startHost.set(L("보내기 시작", "Start sharing"), symbol: "play.fill", target: self, action: #selector(beginHosting)),
-                 endHost.set(L("멈추기", "Stop"), symbol: "stop.fill", target: self, action: #selector(stopHosting))]),
+                 endHost.set(L("송신 중지", "Stop sharing"), symbol: "stop.fill", target: self, action: #selector(confirmStopHosting))]),
             permissionPanel()
         ])
         column(approvalControls, [
@@ -558,14 +562,11 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         let viewers = card(L("받는 기기", "Viewer devices"), "laptopcomputer", [
             hint(L("받는 앱을 만들어 다른 맥이나 Windows PC에서 여세요. 먼저 ‘보내기 시작’을 눌러야 만들 수 있어요.",
                    "Create the viewer app and open it on another Mac or Windows PC. Start sharing first.")),
-            updateNote,
             row([exportApps.set(L("받는 앱 만들기", "Create viewer apps"), symbol: "square.and.arrow.down",
                                 target: self, action: #selector(exportReceivers)),
-                 sendUpdate.set(L("업데이트 보내기", "Send update"), symbol: "arrow.triangle.2.circlepath",
-                                target: self, action: #selector(sendReceiverUpdate)),
                  ActionButton(.quiet).set(L("연결 상태", "Connection info"), symbol: "waveform.path.ecg",
                                           target: self, action: #selector(showReceiverDiagnostics))]),
-            exportLines[0], updateLines[0]
+            row([diySendButton(at: 0)]), updateNotes[0], exportLines[0], updateLines[0]
         ])
         let relayLabel = NSTextField(labelWithString: L("연결 서버", "Connection server"))
         relayLabel.font = .systemFont(ofSize: 14, weight: .medium)
@@ -585,13 +586,20 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     }
 
     private func receiverPage() -> NSView {
-        column(viewerControls, [
+        var controls: [NSView] = [
             viewingLine,
             row([connect.set(L("연결하기", "Connect"), symbol: "play.fill", target: self, action: #selector(beginViewing)),
-                 disconnect.set(L("취소", "Cancel"), symbol: "xmark", target: self, action: #selector(stopViewing)),
-                 installUpdate.set(L("업데이트 설치", "Install update"), symbol: "arrow.down.circle",
-                                   target: self, action: #selector(showReceivedUpdate))])
-        ])
+                 disconnect.set(L("취소", "Cancel"), symbol: "xmark", target: self, action: #selector(stopViewing))])
+        ]
+        if receiver != nil {
+            controls.append(row([
+                checkUpdate.set(L("DIY 업데이트 확인", "Check for DIY update"), symbol: "arrow.clockwise",
+                                target: self, action: #selector(checkReceiverUpdate)),
+                installUpdate.set(L("DIY 업데이트 다시 설치", "Retry DIY update"), symbol: "arrow.down.circle",
+                                  target: self, action: #selector(installReceivedUpdate))
+            ]))
+        }
+        column(viewerControls, controls)
         var first: [NSView] = [column(manualViewerSlot, [])]
         first.append(hint(receiver != nil
             ? L("보내는 맥에서 ‘보내기 시작’을 누른 뒤 연결하세요. 첫 연결 때는 6자리 번호가 나와요.",
@@ -613,8 +621,6 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         cards.append(row([
             ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
                                target: self, action: #selector(enableReceiverInput)),
-            checkUpdate.set(L("업데이트 확인", "Check for updates"), symbol: "arrow.clockwise",
-                            target: self, action: #selector(checkReceiverUpdate)),
             ActionButton().set(L("도움말 복사", "Copy help"), symbol: "doc.on.doc",
                                target: self, action: #selector(copyViewerFix))
         ]))
@@ -675,6 +681,11 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         ActionButton(style).set(title, symbol: symbol, target: self, action: action)
     }
 
+    private func diySendButton(at index: Int) -> ActionButton {
+        sendUpdates[index].set(L("DIY 업데이트 보내기", "Send DIY update"), symbol: "arrow.triangle.2.circlepath",
+                               target: self, action: #selector(sendReceiverUpdate))
+    }
+
     private func senderAgentPage() -> NSView {
         targetPopup.addItems(withTitles: ViewerTarget.allCases.map(\.title))
         targetPopup.setAccessibilityLabel(L("받는 컴퓨터 종류", "Viewing computer"))
@@ -693,7 +704,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         let viewers = card(L("② 받는 앱 보내기", "② Send the viewer app"), "paperplane", [
             hint(L("받는 컴퓨터를 고르세요. AI 도우미가 이메일 주소를 묻고 맞는 앱과 연결 방법을 보내요.",
                    "Pick the viewing computer. The AI assistant asks for an email address and sends the right app.")),
-            targetRow, exportLines[1], updateLines[1]
+            targetRow, row([diySendButton(at: 1)]), updateNotes[1], exportLines[1], updateLines[1]
         ], tone: .section)
         agentViewerCard = viewers
         let first = card(L("③ 첫 연결", "③ First connection"), "checkmark.shield", [
@@ -954,6 +965,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             hosting = host
             self.link = link
             host.onUpdateStatus = { [weak self] in self?.setUpdateStatus($0) }
+            host.onReceiverVersion = { [weak self] in self?.recordReceiverVersion($0) }
             host.onUpdateActivity = { [weak self] activity in
                 self?.updateLines.forEach { $0.show(activity) }
             }
@@ -1015,12 +1027,9 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             if #available(macOS 14, *) { (hosting as? StudioHost)?.receiverProfile = profile }
             hostDelay = 2
             exportApps.isEnabled = !exporting
-            sendUpdate.isEnabled = true
-            if updateRequestedBeforeReady {
-                updateRequestedBeforeReady = false
-                try? FileManager.default.removeItem(at: Self.updateRequestURL)
-                sendReceiverUpdate()
-            } else if #available(macOS 14, *), (hosting as? StudioHost)?.activeDisplayCount == 0 {
+            sendUpdates.forEach { $0.isEnabled = true }
+            if updateRequestedByUser, #available(macOS 14, *) { (hosting as? StudioHost)?.sendReceiverUpdate() }
+            if #available(macOS 14, *), (hosting as? StudioHost)?.activeDisplayCount == 0 {
                 hostStatus.stringValue = L("보낼 준비가 됐어요. 받는 기기가 연결하면 화면을 보내요.",
                                            "Ready. Your screen is shared when a viewer connects.")
             }
@@ -1079,7 +1088,33 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         refreshStepEmphasis()
     }
 
-    @objc private func stopHosting() {
+    @objc private func confirmStopHosting() {
+        guard endHost.isEnabled, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L("이 맥의 송신을 중지할까요?", "Stop sharing from this Mac?")
+        alert.informativeText = L("""
+            송신을 중지하면 지금 연결도 끊겨요. 다시 켜려면 비상용 원격 앱으로 접속하거나, 이 맥에 모니터·키보드·마우스를 연결해 ‘보내기 시작’을 눌러야 해요.
+
+            받는 쪽 연결만 끊으려면:
+            • 맥: 받는 맥에서 \(ReceiverMode.exitKeys)
+            • Windows: Esc를 길게 눌러 전체 화면에서 나온 뒤 ‘연결 끊기’
+            """, """
+            Stopping sharing also ends your current connection. To start sharing again, use a backup remote app or connect a monitor, keyboard, and mouse to this Mac, then click “Start sharing”.
+
+            To disconnect just the viewer:
+            • Mac: press \(ReceiverMode.exitKeys) on the viewer Mac
+            • Windows: hold Esc to leave full screen, then click “Disconnect”
+            """)
+        let keep = alert.addButton(withTitle: L("계속 보내기", "Keep sharing"))
+        keep.keyEquivalent = "\r"
+        alert.addButton(withTitle: L("진짜 끄기", "Stop sharing now")).keyEquivalent = ""
+        alert.beginSheetModal(for: window) { [weak self] result in
+            if result == .alertSecondButtonReturn { self?.stopHosting() }
+        }
+    }
+
+    private func stopHosting() {
         wantsHosting = false
         hostRetry?.cancel()
         hostRetry = nil
@@ -1099,22 +1134,43 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         startHost.isEnabled = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 14
         endHost.isEnabled = false
         exportApps.isEnabled = false
-        sendUpdate.isEnabled = false
+        sendUpdates.forEach { $0.isEnabled = false }
         relayAddress.isEnabled = true
         directEnabled.isEnabled = true
         clearPair()
     }
 
     @objc private func sendReceiverUpdate() {
-        guard #available(macOS 14, *), let host = hosting as? StudioHost, let profile = published else { return }
-        host.sendReceiverUpdate(profile)
+        updateRequestedByUser = true
+        try? Data().write(to: Self.updateRequestURL, options: .atomic)
+        if published != nil, #available(macOS 14, *) { (hosting as? StudioHost)?.sendReceiverUpdate() }
+        refreshSenderState()
+        writeHostStatus()
     }
 
-    @objc private func requestReceiverUpdateFromCommand() {
-        if published != nil { sendReceiverUpdate(); return }
-        updateRequestedBeforeReady = true
-        try? Data().write(to: Self.updateRequestURL, options: .atomic)
+    @objc private func requestReceiverUpdateFromCommand() { sendReceiverUpdate() }
+
+    private var receiverUpdateRequested: Bool {
+        guard !previewing, let current = ReceiverUpdateVersion.current else { return false }
+        return updateRequestedByUser || lastViewerVersion.map { $0 < current } == true
+    }
+
+    private func recordReceiverVersion(_ version: ReceiverUpdateVersion) {
+        if lastViewerVersion != version {
+            lastViewerVersion = version
+            UserDefaults.standard.set(version.label, forKey: "LastDIYViewerVersion")
+        }
+        if let current = ReceiverUpdateVersion.current, version >= current {
+            if updateRequestedByUser {
+                updateRequestedByUser = false
+                try? FileManager.default.removeItem(at: Self.updateRequestURL)
+            }
+            if !updateStatusMessage.isEmpty {
+                setUpdateStatus(L("받는 맥이 최신 버전으로 연결됐어요.", "The viewer connected with the latest version."))
+            }
+        }
         refreshSenderState()
+        writeHostStatus()
     }
 
     private func checkedAt() -> String {
@@ -1164,15 +1220,13 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         if let previous = previous, !(previous.screen && previous.access), !missing, wantsHosting, hosting == nil {
             startSending(requestPermissions: false)
         }
-        var requested = !previewing && updateRequestedBeforeReady
-        if #available(macOS 14, *), (hosting as? StudioHost)?.hasRequestedUpdate == true { requested = true }
-        let note = !requested ? "" : published == nil
-            ? L("받는 앱 업데이트를 보낼 예정이에요. 보내기가 시작되면 보내요.", "A viewer update is queued. It is sent once sharing starts.")
-            : L("받는 앱 업데이트를 보낼 예정이에요. 받는 기기가 연결되면 보내요.", "A viewer update is queued. It is sent when a viewer connects.")
-        if updateNote.stringValue != note {
-            if updateNote.isHidden != note.isEmpty { layoutChanged = true }
-            updateNote.stringValue = note
-            updateNote.isHidden = note.isEmpty
+        let note = !receiverUpdateRequested ? "" : published == nil
+            ? L("화면 보내기를 시작하면 DIY 업데이트를 보낼 수 있어요.", "Start sharing to send the DIY update.")
+            : L("받는 맥이 새 버전으로 연결될 때까지 자동 발송이 켜져 있어요.", "Auto-send stays on until the viewer connects with the new version.")
+        for label in updateNotes where label.stringValue != note {
+            if label.isHidden != note.isEmpty { layoutChanged = true }
+            label.stringValue = note
+            label.isHidden = note.isEmpty
         }
         let summary: String
         if !previewing, let report = LocalSetup.readReport() {
@@ -1204,10 +1258,9 @@ final class StudioApp: NSObject, NSApplicationDelegate {
 
     /// Mirrors the sender status for `--host-status`, so the state can be checked without the window.
     private func writeHostStatus() {
-        var requested = updateRequestedBeforeReady
-        if #available(macOS 14, *), (hosting as? StudioHost)?.hasRequestedUpdate == true { requested = true }
         let snapshot: [String: Any] = ["status": hostStatus.stringValue, "sharing": published != nil,
-                                       "updateRequested": requested, "version": ReceiverUpdateVersion.current?.label ?? "",
+                                       "updateRequested": receiverUpdateRequested, "version": ReceiverUpdateVersion.current?.label ?? "",
+                                       "updateStatus": updateStatusMessage, "lastViewerVersion": lastViewerVersion?.label ?? "",
                                        "screenRecording": permissionsGranted?.screen ?? false,
                                        "accessibility": permissionsGranted?.access ?? false,
                                        "lastExport": lastExport ?? [:]]
@@ -1230,6 +1283,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     }
 
     private func setUpdateStatus(_ text: String) {
+        updateStatusMessage = text
         for line in updateLines {
             line.label.stringValue = text
             line.isHidden = false
@@ -1299,7 +1353,10 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                     self.temporaryResolution = resolution
                     viewer.stop(L("화질을 바꾸고 다시 연결해요.", "Changing quality and reconnecting."))
                 }
-                viewer.onUpdateReady = { [weak self] file, offer in self?.receiveUpdate(file, offer: offer) }
+                viewer.onUpdateReady = { [weak self, weak viewer] file, offer in
+                    guard let self, let viewer, self.viewing === viewer else { return }
+                    self.receiveUpdate(file, offer: offer)
+                }
             }
             viewingLine.show(.busy)
             receiverMode.setActivity(.busy)
@@ -1322,9 +1379,12 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         let viewer = StudioViewer { [weak self] message in self?.viewerStatus.stringValue = message }
         viewer.onUpdateVersion = { [weak self, weak viewer] available in
             guard let self = self, let viewer = viewer else { return }
-            self.showAvailableReceiverVersion(available, on: viewer)
+            self.downloadReceiverUpdate(available, on: viewer)
         }
-        viewer.onUpdateReady = { [weak self] file, offer in self?.receiveUpdate(file, offer: offer) }
+        viewer.onUpdateReady = { [weak self, weak viewer] file, offer in
+            guard let self, let viewer, self.viewing === viewer else { return }
+            self.receiveUpdate(file, offer: offer)
+        }
         viewer.onStopped = { [weak self] in self?.viewerStopped() }
         do {
             viewingLine.show(.busy)
@@ -1339,7 +1399,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showAvailableReceiverVersion(_ available: ReceiverUpdateVersion, on viewer: StudioViewer) {
+    private func downloadReceiverUpdate(_ available: ReceiverUpdateVersion, on viewer: StudioViewer) {
         guard let current = ReceiverUpdateVersion.current else {
             viewer.stop(L("설치된 버전을 읽지 못했어요.", "Couldn't read the installed version."))
             return
@@ -1348,54 +1408,37 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             viewer.stop(L("받는 앱 \(current.label) · 최신 버전이에요.", "Viewer \(current.label) is up to date."))
             return
         }
-        let alert = NSAlert()
-        alert.messageText = L("받는 앱 새 버전(\(available.label))을 받을 수 있어요.", "Viewer \(available.label) is available.")
-        alert.informativeText = L("지금 쓰는 버전은 \(current.label)이에요.", "You're using \(current.label).")
-        alert.addButton(withTitle: L("받기", "Download"))
-        alert.addButton(withTitle: L("나중에", "Later"))
-        alert.beginSheetModal(for: window) { [weak self, weak viewer] result in
-            guard let self = self, let viewer = viewer else { return }
-            if result == .alertFirstButtonReturn, viewer.requestCheckedUpdate() {
-                self.viewerStatus.stringValue = L("새 버전을 준비하고 있어요…", "Preparing the new version…")
-            } else {
-                viewer.stop(L("새 버전(\(available.label))을 받을 수 있어요.", "Version \(available.label) is available."))
-            }
+        if viewer.requestCheckedUpdate() {
+            viewerStatus.stringValue = L("DIY 업데이트를 준비하고 있어요…", "Preparing the DIY update…")
+        } else {
+            viewer.stop(L("DIY 업데이트를 요청하지 못했어요.", "Couldn't request the DIY update."))
         }
     }
 
     private func receiveUpdate(_ file: URL, offer: ReceiverUpdateOffer) {
+        guard !installingReceiverUpdate else { return }
         receiverRetry?.cancel()
         receiverRetry = nil
         receiverMode.leave()
         viewing?.stop()
         receivedUpdate = (file, offer)
-        installUpdate.isHidden = false
-        viewerStatus.stringValue = L("보내는 맥에서 새 받는 앱을 받았어요.", "Received a new viewer app from the host Mac.")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        showReceivedUpdate()
+        installReceivedUpdate()
     }
 
-    @objc private func showReceivedUpdate() {
-        guard let (file, offer) = receivedUpdate, !installingReceiverUpdate, !receiverMode.isActive else { return }
-        let alert = NSAlert()
-        alert.messageText = L("받는 앱 \(offer.version) 설치", "Install viewer \(offer.version)")
-        alert.informativeText = L("보내는 맥에서 보낸 업데이트예요. 설치가 끝나면 앱이 다시 열려요.",
-                                  "This update came from the host Mac. The app reopens after installing.")
-        alert.addButton(withTitle: L("설치", "Install"))
-        alert.addButton(withTitle: L("나중에", "Later"))
-        alert.beginSheetModal(for: window) { [weak self] result in
-            guard let self = self, result == .alertFirstButtonReturn else { return }
-            self.installingReceiverUpdate = true
-            self.viewingLine.show(.busy)
-            self.connect.isEnabled = false
-            self.checkUpdate.isEnabled = false
-            self.installUpdate.isEnabled = false
-            self.viewerStatus.stringValue = L("받은 앱을 확인하고 설치하고 있어요…", "Checking and installing the update…")
-            DispatchQueue.global(qos: .userInitiated).async {
-                let result = Result { try ReceiverUpdateInstall.prepare(file, offer: offer) }
-                DispatchQueue.main.async { self.finishReceiverUpdate(result, file: file) }
-            }
+    @objc private func installReceivedUpdate() {
+        guard let (file, offer) = receivedUpdate, !installingReceiverUpdate, viewing == nil else { return }
+        installingReceiverUpdate = true
+        viewingLine.show(.busy)
+        connect.isEnabled = false
+        checkUpdate.isEnabled = false
+        installUpdate.isHidden = true
+        viewerStatus.stringValue = L("DIY 업데이트를 확인하고 설치하고 있어요…", "Checking and installing the DIY update…")
+        fitWindow()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try ReceiverUpdateInstall.prepare(file, offer: offer) }
+            DispatchQueue.main.async { self.finishReceiverUpdate(result, file: file) }
         }
     }
 
@@ -1418,9 +1461,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             }
         case let .failure(error):
             if error is ReceiverUpdateInstallError, NSWorkspace.shared.open(file) {
-                installingReceiverUpdate = false
-                receiverMayQuit = true
-                NSApp.terminate(nil)
+                updateInstallFailed(L("자동으로 설치할 수 없어요. 설치 파일에서 새 앱을 응용 프로그램 폴더로 옮겨 주세요.",
+                                      "Couldn't install automatically. Move the new app from the installer into Applications."))
             } else {
                 updateInstallFailed(error is ReceiverUpdateInstallError
                     ? L("받은 설치 파일을 열지 못했어요.", "Couldn't open the received installer.")
@@ -1461,7 +1503,9 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         connect.isEnabled = receiver != nil
         checkUpdate.isEnabled = receiver != nil
         installUpdate.isEnabled = receivedUpdate != nil
+        installUpdate.isHidden = receivedUpdate == nil
         viewerStatus.stringValue = message
+        fitWindow()
     }
 
     private func viewerStopped() {
