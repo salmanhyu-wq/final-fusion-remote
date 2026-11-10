@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 import CoreImage
 import CoreText
 import Network
+import ScreenCaptureKit
 import VideoToolbox
 
 @available(macOS 14, *)
@@ -545,8 +546,142 @@ func runSessionTest(output: URL) -> Never {
     print("PASS: older viewers get the update automatically or by legacy request until they report the installed version")
     host.stop()
     print("PASS: idle and update-only sessions leave display power alone, and an authorized receiver starts after display wake")
+    testNativeStartupAfterScreenSaver()
+    testScreenSaverRemoteAccess()
     print("PASS: no capture at idle, full-screen borders and bottom controls, cursor shape, eleven gesture actions, repaired keyboard shortcut, ⌘+Space and ⌘+Tab, encoder stopped")
     exit(0)
+}
+
+@available(macOS 14, *)
+private func testNativeStartupAfterScreenSaver() {
+    func require(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else { fputs("FAIL: \(message)\n", stderr); exit(1) }
+    }
+    func run(_ seconds: TimeInterval, until ready: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !ready() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+
+    let pixels = ReceiverNativePixels(width: 2560, height: 1600)!
+    let options = ReceiverResolution.native.displayOptions(width: 1280, height: 800)!
+    var saver = true
+    var settled = false
+    var capture: Capture?
+    var port: UInt16?
+    var connected = false
+    var firstPicture: Int?
+    let simulation = StudioHost.Simulation(displays: { _, _ in
+        require(false, "transient screen saver and mode change should preserve native quality")
+        return []
+    }, onInput: { _ in }, screenSaverActive: { saver }, nativeDisplay: { wire, requested in
+        require(requested == pixels, "viewer requested original pixel dimensions")
+        let info = DisplayInfo(id: 2, name: "Native startup test", width: pixels.width, height: pixels.height, nativePixels: true)
+        let screen = try Capture(info: info, retina: true, wire: wire, interactive: false)
+        capture = screen
+        return screen
+    }, nativeModeReady: { settled })
+    let host = try! StudioHost(simulation: simulation) { _ in }
+    host.onReady = { port = $0 }
+    try! host.start()
+    run(3) { port != nil }
+    require(port != nil, "native startup listener opened")
+    let mode = ReceiverMode()
+    let viewer = StudioViewer(receiverMode: mode) { _ in }
+    viewer.resolution = .native
+    viewer.matchInputSource = false
+    viewer.onConnected = { connected = true }
+    viewer.onVideoSample = { view, sample in
+        guard firstPicture == nil else { return }
+        require(view.display.nativePixels == true, "viewer kept original quality after the wait")
+        let image = decodeScreenPattern(sample)
+        CVPixelBufferLockBaseAddress(image, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
+        let offset = CVPixelBufferGetBytesPerRowOfPlane(image, 0) * (pixels.height / 2) + pixels.width / 3
+        firstPicture = Int(CVPixelBufferGetBaseAddressOfPlane(image, 0)!.load(fromByteOffset: offset, as: UInt8.self))
+    }
+    defer { viewer.stop(); host.stop(); run(0.1); withExtendedLifetime(mode) {} }
+    let wire = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+    var greeting = host.code
+    greeting.append(1)
+    greeting.append(options.bytes)
+    greeting.append(pixels.bytes)
+    viewer.receive(on: wire, greeting: greeting)
+    run(0.25)
+    require(capture == nil && !connected, "screen saver blocks display preparation")
+    saver = false
+    run(2) { capture != nil }
+    require(capture != nil, "display preparation began after screen saver ended")
+    let wallpaper = makeScreenPattern(pixels.size)
+    CVPixelBufferLockBaseAddress(wallpaper, [])
+    memset(CVPixelBufferGetBaseAddressOfPlane(wallpaper, 0)!, 110,
+           CVPixelBufferGetBytesPerRowOfPlane(wallpaper, 0) * pixels.height)
+    CVPixelBufferUnlockBaseAddress(wallpaper, [])
+    let desktop = makeScreenPattern(pixels.size)
+    run(0.06)
+    capture?.submitTestScreenFrame(wallpaper, status: .complete)
+    run(0.42)
+    require(!connected && firstPicture == nil, "a correctly sized frame cannot bypass an unsettled display mode")
+    capture?.submitTestScreenFrame(nil, status: .suspended)
+    run(0.08)
+    settled = true
+    run(0.18)
+    require(!connected && firstPicture == nil, "the old wallpaper cannot become the first frame after a suspension")
+    capture?.submitTestScreenFrame(desktop, status: .complete)
+    run(4) { firstPicture != nil }
+    require(connected && firstPicture.map { abs($0 - 44) < 14 } == true,
+            "the first image the viewer decodes is the restored desktop")
+    print("PASS: screen saver and unsettled resolution delay startup; suspended wallpaper is replaced by fresh native video")
+}
+
+@available(macOS 14, *)
+private func testScreenSaverRemoteAccess() {
+    func require(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else { fputs("FAIL: \(message)\n", stderr); exit(1) }
+    }
+    func wait(_ seconds: TimeInterval, until ready: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !ready() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    let options = ReceiverResolution.native.displayOptions(width: 1280, height: 800)!
+    let pixels = ReceiverNativePixels(width: 2560, height: 1600)!
+    var saver = true
+    var port: UInt16?
+    var temporaryDisplay: DisplayInfo?
+    var ended = false
+    let simulation = StudioHost.Simulation(displays: { wire, _ in
+        let display = DisplayInfo(id: 3, name: "Current display", width: 1600, height: 1000)
+        return [try Capture(info: display, retina: true, wire: wire, interactive: false)]
+    }, onInput: { input in
+        if input.action == .move { saver = false }
+    }, screenSaverActive: { saver }, nativeDisplay: { _, _ in
+        fputs("FAIL: persistent saver started changing resolution\n", stderr)
+        exit(1)
+    })
+    let host = try! StudioHost(simulation: simulation) { _ in }
+    host.onReady = { port = $0 }
+    try! host.start()
+    wait(3) { port != nil }
+    require(port != nil, "saver remote-access listener opened")
+    let wire = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+    var greeting = host.code
+    greeting.append(1)
+    greeting.append(options.bytes)
+    greeting.append(pixels.bytes)
+    wire.onReady = { [weak wire] in wire?.send(.hello, data: greeting) }
+    wire.onMessage = { kind, _, data in
+        if kind == .screens { temporaryDisplay = (try? JSONDecoder().decode([DisplayInfo].self, from: data))?.first }
+    }
+    wire.onEnd = { _ in ended = true }
+    wire.start()
+    defer { wire.close(); host.stop() }
+    wait(10) { temporaryDisplay != nil }
+    require(saver && temporaryDisplay?.id == 3 && temporaryDisplay?.nativePixels != true,
+            "persistent saver leaves the current display and remote input available")
+    let move = try! JSONEncoder().encode(Input(action: .move, display: 3, x: 0.5, y: 0.5))
+    require(wire.send(.input, data: move), "viewer can send input to dismiss the saver")
+    wait(4) { ended }
+    require(!saver && ended, "host ends the temporary session so the viewer can reconnect at full quality")
+    print("PASS: persistent screen saver keeps remote input available and triggers a fresh connection after dismissal")
 }
 
 private let screenTestPoints = [

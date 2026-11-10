@@ -28,6 +28,9 @@ final class StudioHost {
         let onInput: (Input) -> Void
         var displayReady: (() -> Bool)? = nil
         var updatePayload: (() throws -> Data)? = nil
+        var screenSaverActive: (() -> Bool)? = nil
+        var nativeDisplay: ((Wire, ReceiverNativePixels) throws -> Capture)? = nil
+        var nativeModeReady: (() -> Bool)? = nil
     }
 
     private let simulation: Simulation?
@@ -66,6 +69,8 @@ final class StudioHost {
     private var nativeDisplay: SessionNativeDisplay?
     private var nativePixels: ReceiverNativePixels?
     private var nativeTrial: Capture?
+    private var shareWithoutFitting = false
+    private var resumeNativeAfterScreenSaver = false
     private var displayWake = IOPMAssertionID(0)
     private var displayActivity: NSObjectProtocol?
     private var streamMode = LocalSetup.streamMode()
@@ -150,6 +155,11 @@ final class StudioHost {
             if Date().timeIntervalSince(self.lastSeen) > timeout {
                 wire.close(L("응답 시간이 지났어요.", "The connection timed out."))
             } else if self.authorized {
+                if self.resumeNativeAfterScreenSaver, !self.streams.isEmpty, !self.isScreenSaverActive {
+                    self.resumeNativeAfterScreenSaver = false
+                    wire.close(L("화면 보호기가 끝났어요. 원본 화질로 다시 연결해요.", "The screen saver ended. Reconnecting at full quality."))
+                    return
+                }
                 self.refreshStreamMode()
                 self.sendReceiverControlIfReady()
             }
@@ -183,6 +193,8 @@ final class StudioHost {
         nativeTrial?.stop()
         nativeTrial = nil
         nativePixels = nil
+        shareWithoutFitting = false
+        resumeNativeAfterScreenSaver = false
         restoreDisplay()
         if let activity = displayActivity {
             ProcessInfo.processInfo.endActivity(activity)
@@ -438,10 +450,32 @@ final class StudioHost {
         return displays.prefix(Int(count)).contains { CGDisplayIsAsleep($0) == 0 }
     }
 
+    private var isScreenSaverActive: Bool {
+        if let simulation { return simulation.screenSaverActive?() ?? false }
+        let bounds = CGDisplayBounds(CGMainDisplayID())
+        guard !bounds.isEmpty,
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return false }
+        let saverLevel = Int(CGWindowLevelForKey(.screenSaverWindow))
+        return windows.contains { window in
+            guard let layer = window[kCGWindowLayer as String] as? Int, layer >= saverLevel,
+                  let owner = window[kCGWindowOwnerName as String] as? String,
+                  let rect = window[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: rect as CFDictionary) else { return false }
+            // Wallpaper processes can also have ordinary desktop windows, so require a full-screen overlay.
+            let name = owner.lowercased()
+            guard name.contains("screensaver") || name.hasPrefix("wallpaper") else { return false }
+            let covered = bounds.intersection(frame)
+            return covered.width >= bounds.width * 0.9 && covered.height >= bounds.height * 0.9
+        }
+    }
+
     private func prepare(_ wire: Wire, retina: Bool, options: ReceiverDisplayOptions?) {
         if simulation == nil {
-            if !hasAwakeDisplay {
+            let displayAsleep = !hasAwakeDisplay
+            if displayAsleep {
                 status(L("이 맥의 화면을 깨우고 있어요…", "Waking this Mac's display…"))
+            }
+            if displayAsleep || isScreenSaverActive {
                 _ = IOPMAssertionDeclareUserActivity("Studio Remote screen session" as CFString,
                                                     kIOPMUserActiveRemote, &displayWake)
             }
@@ -453,10 +487,11 @@ final class StudioHost {
 
     private func waitForDisplay(_ wire: Wire, retina: Bool, options: ReceiverDisplayOptions?, retries: Int) {
         guard peer === wire else { return }
-        guard hasAwakeDisplay else {
-            guard retries > 0 else {
-                failScreenStartup(L("이 맥의 화면을 깨우지 못했어요. 모니터 연결과 전원을 확인하세요.", "Couldn't wake this Mac's display. Check the monitor cable and power."), wire: wire)
-                return
+        let displayAwake = hasAwakeDisplay
+        let screenSaver = displayAwake && isScreenSaverActive
+        if retries > 0 && (!displayAwake || screenSaver) {
+            if screenSaver {
+                status(L("보내는 맥의 화면 보호기가 끝나길 기다려요…", "Waiting for the host Mac's screen saver to end…"))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak wire] in
                 guard let self = self, let wire = wire else { return }
@@ -464,12 +499,27 @@ final class StudioHost {
             }
             return
         }
-        if let simulation = simulation {
-            do { try publish(simulation.displays(wire, options), to: wire) }
-            catch { failScreenStartup(error.localizedDescription, wire: wire) }
+        guard displayAwake else {
+            failScreenStartup(L("이 맥의 화면을 깨우지 못했어요. 모니터 연결과 전원을 확인하세요.", "Couldn't wake this Mac's display. Check the monitor cable and power."), wire: wire)
             return
         }
-        if let options = options, options.matchDisplay {
+        if screenSaver {
+            // Keep remote input available on unattended Macs. Re-negotiate full quality once the saver is gone.
+            shareWithoutFitting = true
+            resumeNativeAfterScreenSaver = resumeNativeAfterScreenSaver || nativePixels != nil
+            nativePixels = nil
+        }
+        if let simulation = simulation {
+            do {
+                if let pixels = nativePixels, let options, let makeDisplay = simulation.nativeDisplay {
+                    try startNativeCapture([makeDisplay(wire, pixels)], wire: wire, retina: retina, options: options)
+                } else {
+                    try publish(simulation.displays(wire, options), to: wire)
+                }
+            } catch { failScreenStartup(error.localizedDescription, wire: wire) }
+            return
+        }
+        if !shareWithoutFitting, let options = options, options.matchDisplay {
             if let pixels = nativePixels {
                 fittedDisplay = MatchedDisplay.apply(options, retina: true, nativePixels: pixels)
                 if fittedDisplay == nil, let display = SessionNativeDisplay(pixels) {
@@ -495,7 +545,11 @@ final class StudioHost {
             guard let self = self, let wire = wire, let display = display,
                   self.peer === wire, self.nativeDisplay === display else { return }
             if display.activate() {
-                self.prepareDisplays(wire, retina: retina, options: options, retries: 4)
+                // Let WindowServer commit the new primary display before asking for capture content.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak wire] in
+                    guard let self, let wire, self.peer === wire else { return }
+                    self.prepareDisplays(wire, retina: retina, options: options, retries: 4)
+                }
             } else if retries > 0 {
                 self.prepareNativeMirror(wire, display: display, retina: retina, options: options, retries: retries - 1)
             } else {
@@ -508,20 +562,19 @@ final class StudioHost {
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self, weak wire] content, error in
             DispatchQueue.main.async {
                 guard let self = self, let wire = wire, self.peer === wire else { return }
-                let main = self.nativeDisplay?.id ?? CGMainDisplayID()
-                let sourceMode = CGDisplayCopyDisplayMode(main)
-                let nativeReady = self.nativePixels.map { pixels in
-                    (self.nativeDisplay?.isMirrored ?? true) &&
-                    content?.displays.contains(where: { $0.displayID == main }) == true &&
-                    sourceMode.map { pixels.fitsSource(width: $0.pixelWidth, height: $0.pixelHeight) } == true
-                } ?? true
-                let modeSettling: Bool
-                if let fit = self.fittedDisplay, fit.original != nil,
-                   let display = content?.displays.first(where: { $0.displayID == main }) {
-                    modeSettling = display.width != fit.applied.width || display.height != fit.applied.height
-                } else {
-                    modeSettling = false
+                if !self.shareWithoutFitting && self.isScreenSaverActive {
+                    self.restoreDisplay()
+                    self.waitForDisplay(wire, retina: retina, options: options, retries: 8)
+                    return
                 }
+                let main = self.nativeDisplay?.id ?? CGMainDisplayID()
+                let source = content?.displays.first(where: { $0.displayID == main })
+                let bounds = CGDisplayBounds(main)
+                let sourceReady = source.map { CGFloat($0.width) == bounds.width && CGFloat($0.height) == bounds.height } ?? false
+                let nativeReady = self.nativePixels == nil || (sourceReady && self.nativeModeIsReady)
+                let modeSettling = self.fittedDisplay.map { fit in
+                    !sourceReady || !fit.isApplied || fit.id != main
+                } ?? false
                 if retries > 0, (content?.displays.isEmpty != false || modeSettling || !nativeReady) {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak wire] in
                         guard let self = self, let wire = wire, self.peer === wire else { return }
@@ -531,6 +584,14 @@ final class StudioHost {
                 }
                 if !nativeReady {
                     self.fallbackFromNative(wire, retina: retina, options: options)
+                    return
+                }
+                if modeSettling {
+                    self.restoreDisplay()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak wire] in
+                        guard let self, let wire, self.peer === wire else { return }
+                        self.prepareDisplays(wire, retina: retina, options: options, retries: 4)
+                    }
                     return
                 }
                 do {
@@ -564,6 +625,15 @@ final class StudioHost {
         }
     }
 
+    private var nativeModeIsReady: Bool {
+        if let simulation { return simulation.nativeModeReady?() ?? true }
+        guard let pixels = nativePixels else { return false }
+        let main = CGMainDisplayID()
+        guard (nativeDisplay?.id ?? fittedDisplay?.id) == main, CGDisplayIsActive(main) != 0,
+              nativeDisplay?.isMirrored != false, let mode = CGDisplayCopyDisplayMode(main) else { return false }
+        return pixels.fitsSource(width: mode.pixelWidth, height: mode.pixelHeight)
+    }
+
     private func restoreDisplay() {
         fittedDisplay?.restore()
         fittedDisplay = nil
@@ -572,6 +642,7 @@ final class StudioHost {
     }
 
     private func fallbackFromNative(_ wire: Wire, retina: Bool, options: ReceiverDisplayOptions?) {
+        if nativePixels != nil && isScreenSaverActive { resumeNativeAfterScreenSaver = true }
         nativePixels = nil
         restoreDisplay()
         status(L("원본 화질 화면을 준비하지 못해 ‘높음’으로 연결해요.", "Couldn't prepare full quality, so connecting at High."))
@@ -608,7 +679,7 @@ final class StudioHost {
                     self.fallbackFromNative(wire, retina: retina, options: options)
                     return
                 }
-                self.confirmNativeFrame(captures, wire: wire, retina: retina, options: options, retries: 15)
+                self.confirmNativeFrame(captures, wire: wire, retina: retina, options: options, retries: 20)
             }
         }
     }
@@ -616,7 +687,8 @@ final class StudioHost {
     private func confirmNativeFrame(_ captures: [Capture], wire: Wire, retina: Bool,
                                     options: ReceiverDisplayOptions?, retries: Int) {
         guard peer === wire, let primary = captures.first, nativeTrial === primary else { return }
-        if !primary.hasNativeFrame && retries > 0 {
+        let ready = primary.hasStableNativeFrame && nativeModeIsReady && !isScreenSaverActive
+        if !ready && retries > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak wire] in
                 guard let self = self, let wire = wire else { return }
                 self.confirmNativeFrame(captures, wire: wire, retina: retina, options: options, retries: retries - 1)
@@ -624,7 +696,7 @@ final class StudioHost {
             return
         }
         nativeTrial = nil
-        if primary.hasNativeFrame, (try? publish(captures, to: wire, firstStarted: true)) != nil {
+        if ready, (try? publish(captures, to: wire, firstStarted: true)) != nil {
             primary.pauseForUpdate(false)
         } else {
             primary.stop()
@@ -709,6 +781,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     private var delivery = VideoSendWindow()
     private var latestPixels: CVPixelBuffer?
+    private var nativeFrameSince: DispatchTime?
     private var pendingFrame = false
     private var pausedForUpdate = false
     private var retry: DispatchWorkItem?
@@ -722,10 +795,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var encodeMS: Double?
     var isIdle: Bool { queue.sync { !active && encoder == nil } }
 
-    var hasNativeFrame: Bool {
+    var hasStableNativeFrame: Bool {
         queue.sync {
-            guard let pixels = latestPixels else { return false }
-            return CVPixelBufferGetWidth(pixels) == info.width && CVPixelBufferGetHeight(pixels) == info.height
+            guard let nativeFrameSince else { return false }
+            return DispatchTime.now() >= nativeFrameSince + .milliseconds(300)
         }
     }
 
@@ -842,6 +915,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             self.retry?.cancel()
             self.retry = nil
             self.latestPixels = nil
+            self.nativeFrameSince = nil
             self.pendingFrame = false
             self.stream?.stopCapture { _ in }
             self.stream = nil
@@ -852,6 +926,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func submitTestPattern(_ pixels: CVPixelBuffer) {
         queue.async { self.submit(pixels) }
+    }
+
+    func submitTestScreenFrame(_ pixels: CVPixelBuffer?, status: SCFrameStatus) {
+        queue.async {
+            guard self.active else { return }
+            self.acceptScreenFrame(pixels, status: status)
+        }
     }
 
     func pauseForUpdate(_ paused: Bool) {
@@ -954,10 +1035,26 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, active, let pixels = sample.imageBuffer else { return }
+        guard type == .screen, active else { return }
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
             as? [[SCStreamFrameInfo: Any]]
-        guard attachments?.first?[.status] as? Int == SCFrameStatus.complete.rawValue else { return }
+        guard let rawStatus = attachments?.first?[.status] as? Int,
+              let status = SCFrameStatus(rawValue: rawStatus) else { return }
+        acceptScreenFrame(sample.imageBuffer, status: status)
+    }
+
+    private func acceptScreenFrame(_ pixels: CVPixelBuffer?, status: SCFrameStatus) {
+        if info.nativePixels == true, status == .blank || status == .suspended || status == .stopped {
+            nativeFrameSince = nil
+        }
+        guard status == .complete, let pixels else { return }
+        if info.nativePixels == true {
+            guard CVPixelBufferGetWidth(pixels) == info.width, CVPixelBufferGetHeight(pixels) == info.height else {
+                nativeFrameSince = nil
+                return
+            }
+            if nativeFrameSince == nil { nativeFrameSince = .now() }
+        }
         submit(pixels)
     }
 
@@ -1475,6 +1572,11 @@ struct MatchedDisplay {
     let id: CGDirectDisplayID
     let original: CGDisplayMode?
     let applied: CGDisplayMode
+
+    var isApplied: Bool {
+        guard let current = CGDisplayCopyDisplayMode(id) else { return false }
+        return Self.same(current, applied)
+    }
 
     static func candidate(for id: CGDirectDisplayID, options: ReceiverDisplayOptions, retina: Bool,
                           nativePixels: ReceiverNativePixels? = nil) -> CGDisplayMode? {

@@ -38,6 +38,8 @@ The native video and session tests use generated data and a local connection. Pr
 
 The session test checks automatic transfer to older Mac viewers, the 1.0.0 update request, and the version check after installation. Only the host's already approved Mac viewers receive an update; the viewer verifies the downloaded file and its bundled profile before installation. A certificate-signed viewer requires the same signing identity for the replacement. Windows viewers are exported again from the host.
 
+The 1.0.3 session test also simulates a screen saver, a display mode still settling, and a suspended video stream. It checks that a fresh desktop frame starts the full-quality session and that a persistent screen saver leaves remote input available before reconnecting. This test uses simulated screen saver states.
+
 ## Find and fix a problem
 
 - **Settings, activity indicators and preview:** `main.swift`, `Design.swift`, `UIPreview.swift`.
