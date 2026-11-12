@@ -64,10 +64,10 @@ func runSessionTest(output: URL) -> Never {
             capture?.submitTestPattern(pattern)
         }
     }
-    var port: UInt16?
-    host.onReady = { port = $0 }
+    var localSocket: String?
+    host.onReady = { localSocket = $0 }
     try! host.start()
-    waitFor("sender listening") { port != nil }
+    waitFor("sender listening") { localSocket != nil }
     require(host.activeDisplayCount == 0 && prepared == 0 && !started && displayChecks == 0,
             "idle sender leaves the screen alone")
 
@@ -75,7 +75,7 @@ func runSessionTest(output: URL) -> Never {
     let viewer = StudioViewer(receiverMode: receiverMode) { _ in }
     viewer.matchInputSource = false
     let canvas = ReceiverCanvas(frame: viewport)
-    let client = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+    let client = Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main)
     var received = false
     var recovered = false
     var testedView: RemoteView?
@@ -471,7 +471,7 @@ func runSessionTest(output: URL) -> Never {
     checker.onUpdateVersion = { checked = $0 }
     var queryGreeting = host.code
     queryGreeting.append(ReceiverUpdatePhase.checkOnlyGreeting)
-    let queryWire = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+    let queryWire = Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main)
     checker.receive(on: queryWire, greeting: queryGreeting)
     waitFor("receiver can check for an update without starting a screen session") { checked != nil }
     require(checked == ReceiverUpdateVersion.current && host.activeDisplayCount == 0 && prepared == 1,
@@ -497,7 +497,7 @@ func runSessionTest(output: URL) -> Never {
         host.onUpdateStatus = { message in
             if message.hasPrefix(L("파일을 보냈어요.", "Update sent.")) { acknowledged = true }
         }
-        let connection = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+        let connection = Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main)
         var greeting = host.code
         greeting.append(checkOnly ? ReceiverUpdatePhase.checkOnlyGreeting : 0)
         if !checkOnly { greeting.append(options.bytes) }
@@ -567,7 +567,7 @@ private func testNativeStartupAfterScreenSaver() {
     var saver = true
     var settled = false
     var capture: Capture?
-    var port: UInt16?
+    var localSocket: String?
     var connected = false
     var firstPicture: Int?
     let simulation = StudioHost.Simulation(displays: { _, _ in
@@ -581,10 +581,10 @@ private func testNativeStartupAfterScreenSaver() {
         return screen
     }, nativeModeReady: { settled })
     let host = try! StudioHost(simulation: simulation) { _ in }
-    host.onReady = { port = $0 }
+    host.onReady = { localSocket = $0 }
     try! host.start()
-    run(3) { port != nil }
-    require(port != nil, "native startup listener opened")
+    run(3) { localSocket != nil }
+    require(localSocket != nil, "native startup listener opened")
     let mode = ReceiverMode()
     let viewer = StudioViewer(receiverMode: mode) { _ in }
     viewer.resolution = .native
@@ -600,7 +600,7 @@ private func testNativeStartupAfterScreenSaver() {
         firstPicture = Int(CVPixelBufferGetBaseAddressOfPlane(image, 0)!.load(fromByteOffset: offset, as: UInt8.self))
     }
     defer { viewer.stop(); host.stop(); run(0.1); withExtendedLifetime(mode) {} }
-    let wire = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+    let wire = Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main)
     var greeting = host.code
     greeting.append(1)
     greeting.append(options.bytes)
@@ -645,7 +645,7 @@ private func testScreenSaverRemoteAccess() {
     let options = ReceiverResolution.native.displayOptions(width: 1280, height: 800)!
     let pixels = ReceiverNativePixels(width: 2560, height: 1600)!
     var saver = true
-    var port: UInt16?
+    var localSocket: String?
     var temporaryDisplay: DisplayInfo?
     var ended = false
     let simulation = StudioHost.Simulation(displays: { wire, _ in
@@ -658,11 +658,11 @@ private func testScreenSaverRemoteAccess() {
         exit(1)
     })
     let host = try! StudioHost(simulation: simulation) { _ in }
-    host.onReady = { port = $0 }
+    host.onReady = { localSocket = $0 }
     try! host.start()
-    wait(3) { port != nil }
-    require(port != nil, "saver remote-access listener opened")
-    let wire = Wire(NWConnection(to: loopback(port!), using: tcpParameters()), queue: .main)
+    wait(3) { localSocket != nil }
+    require(localSocket != nil, "saver remote-access listener opened")
+    let wire = Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main)
     var greeting = host.code
     greeting.append(1)
     greeting.append(options.bytes)

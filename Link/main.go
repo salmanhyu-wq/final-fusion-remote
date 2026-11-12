@@ -258,7 +258,7 @@ func (g *gateway) handle(conn net.Conn) {
 
 func (g *gateway) forward(conn net.Conn, body []byte) {
 	_ = conn.SetDeadline(time.Time{})
-	backend, err := net.DialTimeout("tcp4", g.sink, 3*time.Second)
+	backend, err := net.DialTimeout("unix", g.sink, 3*time.Second)
 	if err != nil {
 		_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
 		_ = writeFrame(conn, 7, []byte(tr("보내는 맥이 아직 보낼 준비가 되지 않았어요.", "The host Mac isn't ready to share yet.")))

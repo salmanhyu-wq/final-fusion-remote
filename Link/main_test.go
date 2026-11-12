@@ -75,6 +75,38 @@ func TestReadHelloUpdateCheck(t *testing.T) {
 	}
 }
 
+func testHostSocket(t *testing.T) *net.UnixListener {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ff-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "link.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return listener
+}
+
+func TestHostSocketRejectsPublicPaths(t *testing.T) {
+	path := testHostSocket(t).Addr().String()
+	if !privateHostSocket(path) || privateHostSocket("4178") {
+		t.Fatal("only a private filesystem socket may be used by the host")
+	}
+	if err := os.Chmod(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if privateHostSocket(path) {
+		t.Fatal("host must reject a socket in a directory open to other users")
+	}
+}
+
 func TestPairingAndReconnect(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	state, err := loadHostState(path)
@@ -84,11 +116,7 @@ func TestPairingAndReconnect(t *testing.T) {
 	hostCode := randomBytes(16)
 	pin := sha256.Sum256(state.Cert)
 	p := profile{"https://relay.example.com", hex.EncodeToString(make([]byte, 32)), hex.EncodeToString(pin[:]), state.Invitation}
-	backend, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer backend.Close()
+	backend := testHostSocket(t)
 	auth := make(chan []byte, 3)
 	go func() {
 		for {
@@ -259,11 +287,7 @@ func TestGatewayForwardsMacDisplayOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	backend, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer backend.Close()
+	backend := testHostSocket(t)
 	_ = backend.SetDeadline(time.Now().Add(3 * time.Second))
 
 	hostCode := bytes.Repeat([]byte{4}, 16)

@@ -981,9 +981,9 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                 guard let self = self, let host = host, self.hosting === host else { return }
                 self.retrySending(reason)
             }
-            host.onReady = { [weak self, weak host, weak link] localPort in
+            host.onReady = { [weak self, weak host, weak link] localSocket in
                 guard let self = self, let host = host, let link = link, self.hosting === host else { return }
-                do { try link.start(setup: setup, code: host.code, localPort: localPort) }
+                do { try link.start(setup: setup, code: host.code, localSocket: localSocket) }
                 catch { self.retrySending(error.localizedDescription) }
             }
             try host.start()

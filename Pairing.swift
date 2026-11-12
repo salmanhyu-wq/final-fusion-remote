@@ -193,10 +193,10 @@ final class HostLink {
     var onEvent: ((Event) -> Void)?
     var onEnd: (() -> Void)?
 
-    func start(setup: RelaySetup, code: Data, localPort: UInt16) throws {
+    func start(setup: RelaySetup, code: Data, localSocket: String) throws {
         try LocalSetup.prepare()
         process.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/StudioLink")
-        process.arguments = ["host", setup.relay, LocalSetup.home.path, String(localPort)]
+        process.arguments = ["host", setup.relay, LocalSetup.home.path, localSocket]
         process.environment = ProcessInfo.processInfo.environment.merging([AppLanguage.environmentKey: AppLanguage.code]) { $1 }
         process.standardInput = input
         process.standardOutput = output

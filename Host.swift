@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
 import CoreImage
+import Darwin
 import IOKit.pwr_mgt
 import Network
 import ScreenCaptureKit
@@ -35,6 +36,7 @@ final class StudioHost {
 
     private let simulation: Simulation?
     private var listener: NWListener?
+    private var socketDirectory: URL?
     private var peer: Wire?
     private var authorized = false
     private var updateOnly = false
@@ -72,6 +74,8 @@ final class StudioHost {
     private var shareWithoutFitting = false
     private var resumeNativeAfterScreenSaver = false
     private var displayWake = IOPMAssertionID(0)
+    private var userActivity = IOPMAssertionID(0)
+    private var lastUserActivity: TimeInterval = 0
     private var displayActivity: NSObjectProtocol?
     private var streamMode = LocalSetup.streamMode()
     private let control = HostInput()
@@ -79,7 +83,7 @@ final class StudioHost {
     private var lastCursor: Int?
     let code: Data
     let status: (String) -> Void
-    var onReady: ((UInt16) -> Void)?
+    var onReady: ((String) -> Void)?
     var onFailure: ((String) -> Void)?
 
     init(simulation: Simulation? = nil, status: @escaping (String) -> Void) throws {
@@ -88,23 +92,52 @@ final class StudioHost {
         code = try makeCode()
     }
 
+    deinit {
+        listener?.cancel()
+        if let socketDirectory { try? FileManager.default.removeItem(at: socketDirectory) }
+    }
+
     func start() throws {
-        let parameters = tcpParameters()
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
-        let listener = try NWListener(using: parameters)
+        guard listener == nil else { return }
+        // A short path fits macOS's socket address limit. mkdtemp creates the
+        // directory with owner-only access before the listener binds.
+        var template = Array("/private/tmp/ff-local.XXXXXX".utf8CString)
+        guard let created = mkdtemp(&template) else {
+            throw StudioError.message(L("내부 연결을 준비할 수 없어요.", "Couldn't prepare the local connection."))
+        }
+        let directory = URL(fileURLWithPath: String(cString: created), isDirectory: true)
+        let socket = directory.appendingPathComponent("link.sock").path
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .unix(path: socket)
+        let listener: NWListener
+        do {
+            listener = try NWListener(using: parameters)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
         listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener, self.listener === listener else { return }
             switch state {
             case .ready:
-                if let port = listener?.port { self?.onReady?(port.rawValue) }
+                do {
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: socket)
+                    self.onReady?(socket)
+                } catch {
+                    self.stop()
+                    self.onFailure?(error.localizedDescription)
+                }
             case let .failed(error):
-                self?.onFailure?(error.localizedDescription)
+                self.stop()
+                self.onFailure?(error.localizedDescription)
             default: break
             }
         }
-        listener.newConnectionHandler = { [weak self] conn in
-            guard let self = self else { conn.cancel(); return }
+        listener.newConnectionHandler = { [weak self, weak listener] conn in
+            guard let self, let listener, self.listener === listener else { conn.cancel(); return }
             self.accept(conn)
         }
+        socketDirectory = directory
         self.listener = listener
         listener.start(queue: .main)
     }
@@ -116,12 +149,14 @@ final class StudioHost {
             clean(wire)
             wire.close()
         }
+        if let socketDirectory {
+            try? FileManager.default.removeItem(at: socketDirectory)
+            self.socketDirectory = nil
+        }
     }
 
     private func accept(_ conn: NWConnection) {
-        guard peer == nil,
-              case let .hostPort(.ipv4(address), _) = conn.endpoint,
-              address == IPv4Address("127.0.0.1") else {
+        guard peer == nil else {
             conn.cancel()
             return
         }
@@ -204,6 +239,20 @@ final class StudioHost {
             IOPMAssertionRelease(displayWake)
             displayWake = 0
         }
+        if userActivity != 0 {
+            IOPMAssertionRelease(userActivity)
+            userActivity = 0
+        }
+        lastUserActivity = 0
+    }
+
+    // The lock screen rejects even a correct password until macOS reports an active user,
+    // and posted events alone don't count while the display is off.
+    private func declareUserActivity() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastUserActivity >= 1 else { return }
+        lastUserActivity = now
+        _ = IOPMAssertionDeclareUserActivity("Studio Remote input" as CFString, kIOPMUserActiveLocal, &userActivity)
     }
 
     private func receive(_ kind: Kind, screen: UInt32, _ data: Data, wire: Wire) {
@@ -293,7 +342,10 @@ final class StudioHost {
                 return
             }
             if let simulation = simulation { simulation.onInput(input) }
-            else { control.handle(input, capture: streams.first { $0.info.id == input.display }) }
+            else {
+                if input.action != .release && input.action != .inputSource { declareUserActivity() }
+                control.handle(input, capture: streams.first { $0.info.id == input.display })
+            }
         default: wire.close(L("잘못된 접속 메시지예요.", "Invalid connection message."))
         }
     }

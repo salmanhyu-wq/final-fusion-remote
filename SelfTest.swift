@@ -386,10 +386,21 @@ func runLoopbackTest() -> Never {
     if #available(macOS 14, *) {
         do {
             var wire: Wire?
+            var socket: String?
+            var rejected = false
             let host = try StudioHost { _ in }
-            host.onReady = { port in
+            host.onReady = { path in
                 guard wire == nil else { return }
-                let connection = NWConnection(to: loopback(port), using: tcpParameters())
+                let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
+                let mode = { (path: String) in
+                    (try? FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue
+                }
+                guard mode(parent) == 0o700, mode(path) == 0o600 else {
+                    fputs("FAIL: host socket permissions were not owner-only\n", stderr)
+                    exit(1)
+                }
+                socket = path
+                let connection = NWConnection(to: .unix(path: path), using: .tcp)
                 let peer = Wire(connection, queue: .main)
                 wire = peer
                 peer.onReady = { [weak peer] in
@@ -400,21 +411,30 @@ func runLoopbackTest() -> Never {
                         fputs("FAIL: unauthenticated client received a protected message\n", stderr)
                         exit(1)
                     }
-                    print("PASS: host loopback listener; incorrect pairing code refused before capture")
-                    exit(0)
+                    rejected = true
                 }
                 peer.start()
             }
             try host.start()
             let deadline = Date().addingTimeInterval(6)
-            while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-            withExtendedLifetime(host) {}
+            while !rejected && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            host.stop()
+            if let socket, rejected {
+                guard !FileManager.default.fileExists(atPath: URL(fileURLWithPath: socket).deletingLastPathComponent().path) else {
+                    fputs("FAIL: host socket directory remained after stopping\n", stderr)
+                    exit(1)
+                }
+                print("PASS: owner-only host socket; wrong code refused before capture; socket removed")
+                exit(0)
+            }
         } catch {
             fputs("FAIL: \(error.localizedDescription)\n", stderr)
             exit(1)
         }
     }
-    fputs("FAIL: loopback listener or pairing rejection did not respond\n", stderr)
+    fputs("FAIL: private listener or pairing rejection did not respond\n", stderr)
     exit(1)
 }
 

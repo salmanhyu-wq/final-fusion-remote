@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -88,9 +87,20 @@ func dialRelay(ctx context.Context, origin, path string, headers http.Header) (*
 	return conn, nil
 }
 
-func serveHost(origin, dir, localPort string) error {
-	port, err := strconv.ParseUint(localPort, 10, 16)
-	if err != nil || port == 0 {
+func privateHostSocket(path string) bool {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	dir, err := os.Lstat(filepath.Dir(path))
+	if err != nil || !dir.IsDir() || dir.Mode().Perm() != 0700 {
+		return false
+	}
+	entry, err := os.Lstat(path)
+	return err == nil && entry.Mode().Type() == os.ModeSocket && entry.Mode().Perm() == 0600
+}
+
+func serveHost(origin, dir, localSocket string) error {
+	if !privateHostSocket(localSocket) {
 		return errors.New(tr("화면 보내기 연결을 열 수 없어요.", "Couldn't open the screen sharing connection."))
 	}
 	parsed, err := relayOrigin(origin)
@@ -111,7 +121,7 @@ func serveHost(origin, dir, localPort string) error {
 		return errors.New("invalid local startup")
 	}
 	code, _ := hex.DecodeString(input.Text())
-	g := &gateway{state: state, path: path, hostCode: code, out: os.Stdout, sink: net.JoinHostPort("127.0.0.1", localPort)}
+	g := &gateway{state: state, path: path, hostCode: code, out: os.Stdout, sink: localSocket}
 	pin := sha256.Sum256(state.Cert)
 	macPin := sha256.Sum256(state.MacCert)
 	receiver := struct {

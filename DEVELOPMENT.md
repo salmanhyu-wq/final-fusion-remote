@@ -42,6 +42,10 @@ The 1.0.3 session test also simulates a screen saver, a display mode still settl
 
 To check 1.0.4 on hardware, disconnect the host monitor, reconnect from a Mac viewer using Full quality, and verify that the received dimensions match the viewer and fill the display. This exercises the virtual primary display path.
 
+1.0.5 moves the link between the host app and its helper to a local socket that only the app's own macOS account can open. The loopback test checks the socket's permissions, that a wrong code is refused before capture, and that the socket is removed.
+
+1.0.6 fixes unlocking a host whose display went to sleep while locked. The lock screen holds a password check until macOS reports an active user, and events posted by the app do not count while the display is off, so a correct password was rejected. The host now declares user activity when viewer input arrives, at most once a second. To check it on hardware, let the host display sleep and lock, connect from a viewer, and unlock with the password.
+
 ## Find and fix a problem
 
 - **Settings, activity indicators and preview:** `main.swift`, `Design.swift`, `UIPreview.swift`.
