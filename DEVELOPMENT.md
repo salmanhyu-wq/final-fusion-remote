@@ -46,11 +46,16 @@ To check 1.0.4 on hardware, disconnect the host monitor, reconnect from a Mac vi
 
 1.0.6 fixes unlocking a host whose display went to sleep while locked. The lock screen holds a password check until macOS reports an active user, and events posted by the app do not count while the display is off, so a correct password was rejected. The host now declares user activity when viewer input arrives, at most once a second. To check it on hardware, let the host display sleep and lock, connect from a viewer, and unlock with the password.
 
+1.0.7 sends the host's system sound. The capture stream that carries the picture also captures sound, which is packed as Opus (48 kHz stereo, 20 ms packets) and sent in a new `audio` message. Older viewers close the connection on a message kind they do not know, so the host only offers sound in its display list and sends it after the viewer asks with the `audio` input; sound capture is switched on at that point too. While a viewer listens, the host mutes its default output device and restores it when listening stops, the connection ends, or the app starts again after a crash. The Mac viewer plays through `AVAudioEngine` with a 40 ms cushion and drops sound that falls more than 80 ms behind it, which keeps sound close to the picture without delaying the picture. The Windows viewer uses WebCodecs and Web Audio.
+
+The self test checks the Opus round trip, and the session test checks that sound is sent only after a request, arrives in order, decodes to the test tone and stops on request. `--test-audio-capture <file>` captures the Mac's real sound for a few seconds with the speakers muted; it needs Screen Recording permission, so open the signed app with that argument (`open -n -W "$app" --args --test-audio-capture "$out/audio.txt"`) and read the file. Listening on a real viewer and checking lip sync remain hardware checks.
+
 ## Find and fix a problem
 
 - **Settings, activity indicators and preview:** `main.swift`, `Design.swift`, `UIPreview.swift`.
 - **Mac viewer, screen fitting and shortcuts:** `Viewer.swift`, `ReceiverMode.swift`, `InputBehavior.swift`, `TrackpadGestures.swift`.
 - **Host capture and input:** `Host.swift`, `VirtualDisplay.m`.
+- **Sound:** `Audio.swift`.
 - **Pairing and update files:** `Pairing.swift`, `ReceiverUpdate.swift`.
 - **Windows UI, direct and relay transport:** `Link/`, `Link/ui/`, `Wire.swift`, `Relay/`.
 - **AI help and diagnostics:** `AgentSupport.swift`, `Link/ui/*-agent*.txt`.

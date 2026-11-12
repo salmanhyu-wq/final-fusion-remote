@@ -54,6 +54,10 @@ final class StudioViewer {
     private(set) var diagnosticSession = UUID()
     var resolution: ReceiverResolution = .medium
     var matchInputSource = true
+    var playsAudio = true
+    /// A test receives the decoded host sound here instead of hearing it.
+    var onAudioDecoded: ((AVAudioPCMBuffer) -> Void)?
+    private var audio: AudioPlayer?
     var screenMargin: CGFloat = 0
     private var lastKeyboardSource: String?
     private var inputSourceObserver: NSObjectProtocol?
@@ -326,6 +330,8 @@ final class StudioViewer {
         if let observer = inputSourceObserver { NotificationCenter.default.removeObserver(observer) }
         inputSourceObserver = nil
         lastKeyboardSource = nil
+        audio?.stop()
+        audio = nil
         acceptsUpdates = false
         updateDownload = nil
         receiverMode?.display([])
@@ -360,6 +366,10 @@ final class StudioViewer {
             onConnected?()
             if let host = displays.first(where: { $0.cursorShapes == true && $0.localCursor == true }) {
                 send(Input(action: .cursorShapes, display: host.id))
+            }
+            if playsAudio, AudioPlayer.isAvailable, let host = displays.first(where: { $0.audio == true }) {
+                audio = AudioPlayer(onDecoded: onAudioDecoded)
+                send(Input(action: .audio, display: host.id, b: 1))
             }
             if let receiverMode = receiverMode {
                 let nativeCaps = matchInputSource && MacInputSource.usesSystemCapsSwitch && MacInputSource.koreanPair() != nil
@@ -439,6 +449,9 @@ final class StudioViewer {
                   let request = try? JSONDecoder().decode(ReceiverResolutionRequest.self, from: data),
                   request.session == diagnosticSession, request.resolution != resolution else { return }
             onResolutionRequested?(request.resolution)
+        case .audio:
+            guard sawScreens else { return }
+            audio?.receive(data, number: id)
         case .cursor:
             guard sawScreens, let cursor = CursorShape(data)?.cursor else { return }
             for view in views.values { view.remoteCursor = cursor }

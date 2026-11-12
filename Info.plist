@@ -8,8 +8,8 @@
     <key>CFBundleName</key><string>파이널 퓨전</string>
     <key>CFBundleDisplayName</key><string>파이널 퓨전</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0.6</string>
-    <key>CFBundleVersion</key><string>36</string>
+    <key>CFBundleShortVersionString</key><string>1.0.7</string>
+    <key>CFBundleVersion</key><string>37</string>
     <key>FinalFusionSource</key><string>https://github.com/salmanhyu-wq/final-fusion-remote</string>
     <key>CFBundleIconFile</key><string>StudioRemote.icns</string>
     <key>NSLocalNetworkUsageDescription</key><string>허용된 기기끼리 화면을 연결해요.</string>

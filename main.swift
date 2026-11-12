@@ -32,6 +32,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private let inputLanguage = NSButton(checkboxWithTitle: L("이 맥의 입력 언어(한/영) 따라가기",
                                                               "Match this Mac's keyboard language"),
                                          target: nil, action: nil)
+    private let hostSound = NSButton(checkboxWithTitle: L("보내는 맥의 소리 듣기", "Play the host Mac's sound"),
+                                     target: nil, action: nil)
     private let diagnostics = NSButton(checkboxWithTitle: L("연결 상태를 보내는 맥에 알려 주기",
                                                             "Share connection stats with the host Mac"),
                                        target: nil, action: nil)
@@ -119,7 +121,10 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                                         "When a new device connects, type the 6-digit code it shows.")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if !receiverOnly { SessionKeyboardLayout.recover() }
+        if !receiverOnly {
+            SessionKeyboardLayout.recover()
+            HostSpeakerMute.recover()
+        }
         let menu = NSMenu()
         let menuItem = NSMenuItem()
         menu.addItem(menuItem)
@@ -235,6 +240,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(diagnostics.state == .off, forKey: "DisableReceiverDiagnostics")
         UserDefaults.standard.set(remoteTuning.state == .on, forKey: "AllowRemoteReceiverTuning")
         UserDefaults.standard.set(inputLanguage.state == .off, forKey: "KeepSenderInputSource")
+        UserDefaults.standard.set(hostSound.state == .off, forKey: "MuteHostSound")
     }
 
     @objc private func showReceiverDiagnostics() {
@@ -399,7 +405,11 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         inputLanguage.state = UserDefaults.standard.bool(forKey: "KeepSenderInputSource") ? .off : .on
         inputLanguage.target = self
         inputLanguage.action = #selector(saveReceiverOptions)
-        for box in [login, inputLanguage, diagnostics, remoteTuning, directEnabled] {
+        hostSound.state = UserDefaults.standard.bool(forKey: "MuteHostSound") ? .off : .on
+        hostSound.target = self
+        hostSound.action = #selector(saveReceiverOptions)
+        hostSound.toolTip = L("다음 연결부터 적용돼요.", "Applies from the next connection.")
+        for box in [login, inputLanguage, hostSound, diagnostics, remoteTuning, directEnabled] {
             box.font = .systemFont(ofSize: 14)
         }
 
@@ -617,7 +627,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         displayRow.setCustomSpacing(18, after: quality)
         cards.append(card(L("화면", "Display"), "rectangle.on.rectangle", [displayRow]))
         cards.append(card(L("옵션", "Options"), "slider.horizontal.3",
-                          [inputLanguage, diagnostics, remoteTuning, login, loginStatus], tone: .section))
+                          [inputLanguage, hostSound, diagnostics, remoteTuning, login, loginStatus], tone: .section))
         cards.append(row([
             ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
                                target: self, action: #selector(enableReceiverInput)),
@@ -1334,6 +1344,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             viewer.screenMargin = screenEdge.indexOfSelectedItem == 1 ? 0.025 : 0
             viewer.diagnosticsEnabled = diagnostics.state == .on
             viewer.matchInputSource = inputLanguage.state == .on
+            viewer.playsAudio = hostSound.state == .on
             viewer.onConnected = { [weak self] in
                 guard let self = self else { return }
                 self.viewingLine.show(.idle)
@@ -1658,6 +1669,9 @@ if arguments.count == 2, arguments[1] == "--verify-receiver-startup", receiverOn
 } else if arguments == [arguments[0], "--test-separated-transport"] {
     guard #available(macOS 14, *) else { exit(1) }
     runSeparatedTransportTest()
+} else if arguments.count == 3, arguments[1] == "--test-audio-capture" {
+    guard #available(macOS 14, *) else { exit(1) }
+    runAudioCaptureTest(output: URL(fileURLWithPath: arguments[2]))
 } else if arguments.count == 3, arguments[1] == "--test-session" {
     guard #available(macOS 14, *) else { exit(1) }
     runSessionTest(output: URL(fileURLWithPath: arguments[2]))

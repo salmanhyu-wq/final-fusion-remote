@@ -59,7 +59,7 @@ for arch in arm64 x86_64; do
   /usr/bin/xcrun --sdk macosx swiftc -swift-version 5 -O -sdk "$sdk" \
     -target "$arch-apple-macosx11.0" -module-cache-path "$out/ModuleCache" "$@" \
     -Xlinker -weak_framework -Xlinker ScreenCaptureKit \
-    -module-name StudioRemote -import-objc-header ReceiverEvents.h Localization.swift Design.swift AgentSupport.swift Wire.swift InputBehavior.swift TrackpadGestures.swift ReceiverUpdate.swift Host.swift Viewer.swift PointerFeedback.swift ReceiverMode.swift RelayTunnel.swift Pairing.swift SelfTest.swift SessionTest.swift UIPreview.swift main.swift \
+    -module-name StudioRemote -import-objc-header ReceiverEvents.h Localization.swift Design.swift AgentSupport.swift Wire.swift InputBehavior.swift Audio.swift TrackpadGestures.swift ReceiverUpdate.swift Host.swift Viewer.swift PointerFeedback.swift ReceiverMode.swift RelayTunnel.swift Pairing.swift SelfTest.swift SessionTest.swift UIPreview.swift main.swift \
     "$temp/VirtualDisplay-$arch.o" -o "$temp/StudioRemote-$arch"
 done
 /usr/bin/lipo -create "$temp/StudioRemote-arm64" "$temp/StudioRemote-x86_64" -output "$app/Contents/MacOS/StudioRemote"

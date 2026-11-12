@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Carbon.HIToolbox
 import Foundation
 import Network
@@ -378,8 +379,45 @@ func runSelfTests() -> Never {
           shared.contains("roundTripMS") && shared.contains("screenRecording"), "shareable diagnostics retain only safe fields")
     check(ReceiverUpdateVersion.current.map { $0 > ReceiverUpdateVersion("1.0.0")! } == true,
           "the new build can update the previous viewer")
-    print("PASS: screen fitting, input events, update validation, pairing, transport, cursor shapes, system shortcut mode and agent guides")
+    let soundEncoder = AudioEncoder(), soundDecoder = AudioDecoder()
+    var soundPhase = 0.0
+    var heard: [Float] = []
+    for _ in 0..<50 {
+        for packet in soundEncoder.encode(makeTestTone(frames: 480, phase: &soundPhase)) {
+            guard let buffer = soundDecoder.decode(packet), let channel = buffer.floatChannelData?[1] else { continue }
+            heard.append(contentsOf: UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+        }
+    }
+    check(heard.count >= 16_000 && testToneShare(Array(heard.suffix(9_600))) > 0.9, "host sound survives Opus packets in order")
+    check(soundDecoder.decode(Data()) == nil && soundDecoder.decode(Data(repeating: 0, count: 9_000)) == nil,
+          "oversized or empty sound packets are refused")
+    print("PASS: screen fitting, input events, update validation, pairing, transport, cursor shapes, host sound, system shortcut mode and agent guides")
     exit(0)
+}
+
+/// 440 Hz on both channels, the way a capture stream delivers sound.
+func makeTestTone(frames: Int, phase: inout Double) -> AVAudioPCMBuffer {
+    let buffer = AVAudioPCMBuffer(pcmFormat: SessionAudio.pcm, frameCapacity: AVAudioFrameCount(frames))!
+    buffer.frameLength = AVAudioFrameCount(frames)
+    for index in 0..<frames {
+        let value = Float(sin(phase)) * 0.5
+        phase += 2 * .pi * 440 / SessionAudio.sampleRate
+        for channel in 0..<SessionAudio.channels { buffer.floatChannelData![channel][index] = value }
+    }
+    return buffer
+}
+
+/// Share of the signal's energy at 440 Hz: about 1 for the test tone, about 0 for silence or noise.
+func testToneShare(_ samples: [Float]) -> Double {
+    var real = 0.0, imaginary = 0.0, total = 0.0
+    for (index, sample) in samples.enumerated() {
+        let angle = 2 * Double.pi * 440 * Double(index) / SessionAudio.sampleRate
+        real += Double(sample) * cos(angle)
+        imaginary += Double(sample) * sin(angle)
+        total += Double(sample) * Double(sample)
+    }
+    guard total > 1e-6, !samples.isEmpty else { return 0 }
+    return 2 * (real * real + imaginary * imaginary) / Double(samples.count) / total
 }
 
 func runLoopbackTest() -> Never {

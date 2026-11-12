@@ -10,6 +10,8 @@ enum Kind: UInt8 {
     case directOffer, directChoice, directTicket
     /// Host cursor shape (CursorShape). Sent only to receivers that opted in with Input.Action.cursorShapes.
     case cursor
+    /// Host system sound, one Opus packet per message (SessionAudio). Sent only to receivers that opted in with Input.Action.audio.
+    case audio
 }
 
 struct DisplayInfo: Codable {
@@ -32,6 +34,8 @@ struct DisplayInfo: Codable {
     var nativePixels: Bool? = nil
     /// The host can send its cursor shape; receivers opt in with Input.Action.cursorShapes.
     var cursorShapes: Bool? = nil
+    /// The host can send its system sound; receivers opt in with Input.Action.audio.
+    var audio: Bool? = nil
 }
 
 struct ReceiverDisplayOptions {
@@ -219,6 +223,8 @@ struct Input: Codable {
         case rotateLeft, rotateRight, smartZoom
         /// Receiver opt-in for cursor shape messages. Older hosts fail to decode it and ignore it.
         case cursorShapes
+        /// Receiver switch for host sound: b is 1 to start, 0 to stop. Older hosts ignore it.
+        case audio
     }
 
     let action: Action

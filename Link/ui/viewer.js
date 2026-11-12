@@ -110,6 +110,8 @@ async function connect(retries = 0) {
         if (!document.activeElement || document.activeElement === document.body || document.activeElement.id === "connect")
           el("screens").querySelector("canvas")?.focus({preventScroll: true});
         playing = true;
+        const speaker = displays.find(display => display.audio === true);
+        if (speaker) void startSound(speaker.id);
         lastReportAt = performance.now();
         pulse = setInterval(() => {
           void post("pulse?stamp=" + Date.now()).catch(() => {});
@@ -131,6 +133,8 @@ async function connect(retries = 0) {
           const rtt = Date.now() - Number(new DataView(bytes.buffer).getBigUint64(0));
           if (rtt >= 0 && rtt <= 10000) roundTripMS = rtt;
         }
+      } else if (kind === 17) {
+        playSound(bytes);
       } else if (kind === 12) {
         if (bytes.length <= 1024) {
           try { applyReceiverResolution(JSON.parse(utf8.decode(bytes))); } catch (_) {}
@@ -193,8 +197,58 @@ function reportDiagnostics() {
   void post("diagnostics", {headers: {"Content-Type": "application/json"}, body: JSON.stringify(report)}).catch(() => {});
 }
 
+// Host sound arrives as raw Opus packets of 20 ms, 48 kHz stereo, only after this viewer asks for it.
+// A 40 ms cushion keeps it close to the picture; sound that would play much later than that is dropped.
+let sound = null;
+async function startSound(display) {
+  stopSound();
+  const run = generation;
+  const config = {codec: "opus", sampleRate: 48000, numberOfChannels: 2};
+  try {
+    if (!window.AudioDecoder || !window.AudioContext || !(await AudioDecoder.isConfigSupported(config)).supported) return;
+    if (run !== generation || !playing) return;
+    const context = new AudioContext({sampleRate: 48000, latencyHint: "interactive"});
+    const state = {context, next: 0, count: 0};
+    state.decoder = new AudioDecoder({
+      error: () => { if (sound === state) stopSound(); },
+      output: data => {
+        try {
+          const now = context.currentTime;
+          if (state.next < now) state.next = now + 0.04;
+          if (state.next - now > 0.16) return;
+          const buffer = context.createBuffer(data.numberOfChannels, data.numberOfFrames, data.sampleRate);
+          for (let channel = 0; channel < data.numberOfChannels; channel++)
+            data.copyTo(buffer.getChannelData(channel), {planeIndex: channel, format: "f32-planar"});
+          const source = context.createBufferSource();
+          source.buffer = buffer;
+          source.connect(context.destination);
+          source.start(state.next);
+          state.next += buffer.duration;
+        } catch (_) {} finally { data.close(); }
+      }
+    });
+    state.decoder.configure(config);
+    sound = state;
+    if (context.state === "suspended") void context.resume().catch(() => {});
+    enqueue(event("audio", display, 0, 0, 0, 1, 0));
+  } catch (_) { stopSound(); }
+}
+function playSound(bytes) {
+  if (!sound || !bytes.length) return;
+  try {
+    sound.decoder.decode(new EncodedAudioChunk({type: "key", timestamp: sound.count++ * 20000, data: bytes}));
+  } catch (_) { stopSound(); }
+}
+function stopSound() {
+  const state = sound;
+  sound = null;
+  if (!state) return;
+  try { state.decoder.close(); } catch (_) {}
+  void state.context.close().catch(() => {});
+}
 function stop(reason, tone = "idle") {
   generation++; active = false; playing = false; pending = [];
+  stopSound();
   controller?.abort(); clearInterval(pulse);
   const closed = generation;
   const stopped = post("disconnect").catch(() => {}).finally(() => {

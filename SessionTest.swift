@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Carbon.HIToolbox
 import CoreImage
 import CoreText
@@ -548,6 +549,7 @@ func runSessionTest(output: URL) -> Never {
     print("PASS: idle and update-only sessions leave display power alone, and an authorized receiver starts after display wake")
     testNativeStartupAfterScreenSaver()
     testScreenSaverRemoteAccess()
+    testHostSound()
     print("PASS: no capture at idle, full-screen borders and bottom controls, cursor shape, eleven gesture actions, repaired keyboard shortcut, ⌘+Space and ⌘+Tab, encoder stopped")
     exit(0)
 }
@@ -682,6 +684,182 @@ private func testScreenSaverRemoteAccess() {
     wait(4) { ended }
     require(!saver && ended, "host ends the temporary session so the viewer can reconnect at full quality")
     print("PASS: persistent screen saver keeps remote input available and triggers a fresh connection after dismissal")
+}
+
+/// Captures this Mac's real sound for a few seconds the way a session does: the stream starts silent and sound is
+/// switched on afterwards. It needs Screen Recording permission, so open the signed app with this argument.
+@available(macOS 14, *)
+func runAudioCaptureTest(output: URL) -> Never {
+    final class Listener: NSObject, SCStreamOutput {
+        let encoder = AudioEncoder(), decoder = AudioDecoder()
+        var pictures = 0, buffers = 0, packets = 0, bytes = 0, frames = 0
+        var format = ""
+        var peak: Float = 0
+        func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
+            if type == .screen { pictures += 1; return }
+            guard type == .audio else { return }
+            buffers += 1
+            if format.isEmpty, let source = sample.formatDescription?.audioStreamBasicDescription {
+                format = "\(Int(source.mSampleRate)) Hz, \(source.mChannelsPerFrame) channels, \(source.mBitsPerChannel) bits, flags \(source.mFormatFlags)"
+            }
+            for packet in encoder.encode(sample) {
+                packets += 1
+                bytes += packet.count
+                guard let sound = decoder.decode(packet), let channel = sound.floatChannelData?[0] else { continue }
+                frames += Int(sound.frameLength)
+                for index in 0..<Int(sound.frameLength) { peak = max(peak, abs(channel[index])) }
+            }
+        }
+    }
+    let listener = Listener()
+    let queue = DispatchQueue(label: "studio-remote.audio-capture-test")
+    var lines: [String] = []
+    var stream: SCStream?
+    // The speakers are muted for the test, as they are while a viewer listens; capture must still hear the Mac.
+    let speaker = HostSpeakerMute()
+    speaker.mute()
+    lines.append("speakers muted for the test: \(speaker.isActive)")
+    func finish(_ passed: Bool) -> Never {
+        speaker.restore()
+        lines.append(passed ? "PASS: real host sound was captured, packed and decoded" : "FAIL: no host sound packets")
+        try? lines.joined(separator: "\n").appending("\n").write(to: output, atomically: true, encoding: .utf8)
+        exit(passed ? 0 : 1)
+    }
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+        guard let display = content?.displays.first else {
+            lines.append("no display: \(error?.localizedDescription ?? "none")")
+            finish(false)
+        }
+        let config = SCStreamConfiguration()
+        config.width = 320
+        config.height = 200
+        config.capturesAudio = false
+        let capture = SCStream(filter: SCContentFilter(display: display, excludingApplications: [], exceptingWindows: []),
+                               configuration: config, delegate: nil)
+        stream = capture
+        do { try capture.addStreamOutput(listener, type: .screen, sampleHandlerQueue: queue) }
+        catch { lines.append("picture output: \(error.localizedDescription)"); finish(false) }
+        capture.startCapture { error in
+            if let error { lines.append("start: \(error.localizedDescription)"); finish(false) }
+            queue.asyncAfter(deadline: .now() + 1) {
+                lines.append("sound buffers before switching on: \(listener.buffers)")
+                do { try capture.addStreamOutput(listener, type: .audio, sampleHandlerQueue: queue) }
+                catch { lines.append("sound output: \(error.localizedDescription)") }
+                config.capturesAudio = true
+                config.sampleRate = Int(SessionAudio.sampleRate)
+                config.channelCount = SessionAudio.channels
+                config.excludesCurrentProcessAudio = true
+                capture.updateConfiguration(config) { error in
+                    queue.async { lines.append("switch on: \(error?.localizedDescription ?? "ok")") }
+                }
+            }
+            queue.asyncAfter(deadline: .now() + 6) {
+                lines.append("pictures \(listener.pictures), sound buffers \(listener.buffers), source \(listener.format)")
+                lines.append("packets \(listener.packets), \(listener.bytes) bytes, decoded frames \(listener.frames), peak \(listener.peak)")
+                capture.stopCapture { _ in finish(listener.packets > 0 && listener.frames > 0) }
+            }
+        }
+    }
+    withExtendedLifetime(stream) { dispatchMain() }
+}
+
+@available(macOS 14, *)
+private func testHostSound() {
+    func require(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else { fputs("FAIL: \(message)\n", stderr); exit(1) }
+    }
+    func wait(_ seconds: TimeInterval, until ready: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !ready() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    var capture: Capture?
+    var localSocket: String?
+    let simulation = StudioHost.Simulation(displays: { wire, _ in
+        let display = DisplayInfo(id: 4, name: "Sound test", width: 1280, height: 800, localCursor: true, audio: true)
+        let screen = try Capture(info: display, retina: false, wire: wire, interactive: true)
+        capture = screen
+        return [screen]
+    }, onInput: { _ in })
+    let host = try! StudioHost(simulation: simulation) { _ in }
+    host.onReady = { localSocket = $0 }
+    try! host.start()
+    wait(3) { localSocket != nil }
+    require(localSocket != nil, "sound test listener opened")
+    defer { host.stop(); wait(0.1) }
+    var greeting = host.code
+    greeting.append(0)
+    var phase = 0.0
+    func play(_ tenths: Int) {
+        for _ in 0..<tenths { capture?.submitTestAudio(makeTestTone(frames: 4_800, phase: &phase)) }
+    }
+
+    // A viewer that never asks, like every viewer before 1.0.7, must not get a message kind it cannot read.
+    let wire = Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main)
+    var offered: DisplayInfo?
+    var packets: [(number: UInt32, data: Data)] = []
+    var ended = false
+    wire.onReady = { [weak wire] in wire?.send(.hello, data: greeting) }
+    wire.onMessage = { kind, id, data in
+        if kind == .screens { offered = (try? JSONDecoder().decode([DisplayInfo].self, from: data))?.first }
+        if kind == .audio { packets.append((id, data)) }
+    }
+    wire.onEnd = { _ in ended = true }
+    wire.start()
+    wait(10) { offered != nil }
+    require(offered?.audio == true && capture != nil, "host offers its sound")
+    play(5)
+    wait(0.3)
+    require(packets.isEmpty && !ended, "sound stays off until the viewer asks")
+    func ask(_ on: Bool) {
+        let request = try! JSONEncoder().encode(Input(action: .audio, display: 4, b: on ? 1 : 0))
+        require(wire.send(.input, data: request), "viewer can switch host sound")
+        wait(0.15)
+    }
+    ask(true)
+    play(10)
+    wait(4) { packets.count >= 40 }
+    require(packets.count >= 40 && packets.enumerated().allSatisfy { $0.element.number == UInt32($0.offset) },
+            "sound packets arrive numbered in order")
+    let decoder = AudioDecoder()
+    var heard: [Float] = []
+    for packet in packets {
+        guard let buffer = decoder.decode(packet.data), let channel = buffer.floatChannelData?[0] else { continue }
+        heard.append(contentsOf: UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+    }
+    require(testToneShare(Array(heard.suffix(19_200))) > 0.9, "the viewer decodes the host's tone")
+    ask(false)
+    let stoppedAt = packets.count
+    play(5)
+    wait(0.3)
+    require(packets.count == stoppedAt && !ended, "sound stops when the viewer turns it off")
+    wire.close()
+    wait(2) { host.activeDisplayCount == 0 }
+
+    // The real viewer asks by itself and hands decoded sound to its player.
+    capture = nil
+    let mode = ReceiverMode()
+    let viewer = StudioViewer(receiverMode: mode) { _ in }
+    viewer.matchInputSource = false
+    var connected = false
+    var decodedFrames = 0
+    var tail: [Float] = []
+    viewer.onConnected = { connected = true }
+    viewer.onAudioDecoded = { buffer in
+        let samples = Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+        DispatchQueue.main.async {
+            decodedFrames += samples.count
+            tail = Array((tail + samples).suffix(19_200))
+        }
+    }
+    defer { viewer.stop(); withExtendedLifetime(mode) {} }
+    viewer.receive(on: Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main), greeting: greeting)
+    wait(10) { connected && capture != nil }
+    require(connected && capture != nil, "viewer connected for sound")
+    wait(0.3)
+    play(10)
+    wait(4) { decodedFrames >= 40_000 }
+    require(decodedFrames >= 40_000 && testToneShare(tail) > 0.9, "the viewer app asks for sound and decodes it")
+    print("PASS: host sound reaches only viewers that ask for it, in order, and stops on request")
 }
 
 private let screenTestPoints = [

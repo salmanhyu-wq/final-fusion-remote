@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import AVFoundation
 import Carbon.HIToolbox
 import CoreImage
 import Darwin
@@ -79,6 +80,7 @@ final class StudioHost {
     private var displayActivity: NSObjectProtocol?
     private var streamMode = LocalSetup.streamMode()
     private let control = HostInput()
+    private let speaker = HostSpeakerMute()
     private var cursorTimer: DispatchSourceTimer?
     private var lastCursor: Int?
     let code: Data
@@ -243,6 +245,7 @@ final class StudioHost {
             IOPMAssertionRelease(userActivity)
             userActivity = 0
         }
+        speaker.restore()
         lastUserActivity = 0
     }
 
@@ -339,6 +342,15 @@ final class StudioHost {
             lastSeen = Date()
             if input.action == .cursorShapes {
                 if streams.contains(where: { $0.info.cursorShapes == true }) { startCursorSync(wire) }
+                return
+            }
+            if input.action == .audio {
+                guard let stream = streams.first(where: { $0.info.id == input.display && $0.info.audio == true }) else { return }
+                stream.setAudio(input.b == 1)
+                // The viewer hears this Mac now, so its own speakers stay quiet until the viewer stops listening.
+                if simulation == nil {
+                    if input.b == 1 { speaker.mute() } else { speaker.restore() }
+                }
                 return
             }
             if let simulation = simulation { simulation.onInput(input) }
@@ -860,6 +872,11 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var creditBlocked = 0
     private var lastEncodedAt: UInt64 = 0
     private var encodeMS: Double?
+    private let audioQueue = DispatchQueue(label: "studio-remote.capture-audio", qos: .userInteractive)
+    private var streamConfig: SCStreamConfiguration?
+    private var audioOutputAdded = false
+    private var audioEncoder: AudioEncoder?
+    private var audioPacket: UInt32 = 0
     var isIdle: Bool { queue.sync { !active && encoder == nil } }
 
     var hasStableNativeFrame: Bool {
@@ -890,7 +907,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                            notificationShortcut: interactive && ShortcutBinding.current(.notificationCenter) != nil ? true : nil,
                            videoFeedback: interactive ? true : nil, clipboardScreenshots: interactive ? true : nil,
                            nativePixels: nativePixels == nil ? nil : true,
-                           cursorShapes: interactive ? true : nil)
+                           cursorShapes: interactive ? true : nil,
+                           audio: interactive && index == 0 ? true : nil)
         try self.init(info: info, retina: retina || nativePixels != nil, wire: wire, interactive: interactive)
 
         let config = SCStreamConfiguration()
@@ -909,7 +927,45 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         self.stream = stream
+        self.streamConfig = config
         self.screenFilter = filter
+    }
+
+    /// Sound rides on this display's capture stream and starts only when the viewer asks for it.
+    func setAudio(_ enabled: Bool) {
+        guard info.audio == true else { return }
+        audioQueue.async {
+            guard enabled != (self.audioEncoder != nil) else { return }
+            self.audioEncoder = enabled ? AudioEncoder() : nil
+            self.audioPacket = 0
+        }
+        queue.async {
+            guard self.active, let stream = self.stream, let config = self.streamConfig else { return }
+            if enabled && !self.audioOutputAdded {
+                guard (try? stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.audioQueue)) != nil else { return }
+                self.audioOutputAdded = true
+            }
+            config.capturesAudio = enabled
+            config.sampleRate = Int(SessionAudio.sampleRate)
+            config.channelCount = SessionAudio.channels
+            config.excludesCurrentProcessAudio = true
+            stream.updateConfiguration(config) { _ in }
+        }
+    }
+
+    func submitTestAudio(_ buffer: AVAudioPCMBuffer) {
+        audioQueue.async {
+            guard let encoder = self.audioEncoder else { return }
+            self.sendAudio(encoder.encode(buffer))
+        }
+    }
+
+    private func sendAudio(_ packets: [Data]) {
+        for packet in packets {
+            // A skipped number tells the viewer to reset its decoder.
+            wire.send(.audio, screen: audioPacket, data: packet)
+            audioPacket &+= 1
+        }
     }
 
     func screenshot(_ region: ScreenshotRegion?, completion: @escaping (CGImage?) -> Void) {
@@ -989,6 +1045,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             if let encoder = self.encoder { VTCompressionSessionInvalidate(encoder) }
             self.encoder = nil
         }
+        audioQueue.async { self.audioEncoder = nil }
     }
 
     func submitTestPattern(_ pixels: CVPixelBuffer) {
@@ -1102,6 +1159,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
+        if type == .audio {
+            if let encoder = audioEncoder { sendAudio(encoder.encode(sample)) }
+            return
+        }
         guard type == .screen, active else { return }
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
             as? [[SCStreamFrameInfo: Any]]
@@ -1334,7 +1395,7 @@ private final class HostInput {
         let flags = CGEventFlags(rawValue: input.flags & MacModifierKey.supportedFlags)
         switch input.action {
         case .release: release()
-        case .cursorShapes: break
+        case .cursorShapes, .audio: break
         case .inputSource:
             guard macInputMatching, let id = input.keyboardInputSource,
                   MacInputSource.validID(id), id != lastKeyboardRequest else { return }
