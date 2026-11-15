@@ -1,4 +1,4 @@
-# Final Fusion 1.0
+# Final Fusion 1.0.10
 
 **I built this for myself.**
 
@@ -20,6 +20,8 @@ I wish you all the best in whatever you do.
 A direct connection can match the Mac viewer’s pixel dimensions when available. Otherwise it falls back to High quality. Your own relay is available when direct connection cannot be used.
 
 From 1.0.7 the viewer plays the host Mac's sound. While a viewer listens, the host's own speakers are muted and they come back when the connection ends. A Mac viewer can turn this off under Options. Host and viewer both need 1.0.7 or later.
+
+The 1.0.10 source build shares copied text, images and files between Macs. Each copy can contain up to 64 files totaling 200 MB. Copied folder paths are shared as text. Use **Options** on the viewer to turn sharing off.
 
 You can open Final Fusion on the host Mac and change its settings while connected. To disconnect the viewer, press **Fn + Control + Option + Command + F12** on the Mac viewer. On Windows, hold **Esc** to leave full screen, then click **Disconnect**. **Stop sharing** on the host turns off screen sharing. To turn it back on, you need a backup remote app or physical access to the host Mac.
 

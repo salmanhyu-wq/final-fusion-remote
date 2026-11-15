@@ -50,12 +50,17 @@ To check 1.0.4 on hardware, disconnect the host monitor, reconnect from a Mac vi
 
 The self test checks the Opus round trip, and the session test checks that sound is sent only after a request, arrives in order, decodes to the test tone and stops on request. `--test-audio-capture <file>` captures the Mac's real sound for a few seconds with the speakers muted; it needs Screen Recording permission, so open the signed app with that argument (`open -n -W "$app" --args --test-audio-capture "$out/audio.txt"`) and read the file. Listening on a real viewer and checking lip sync remain hardware checks.
 
+## Clipboard sharing
+
+The Mac viewer opts in to clipboard sharing. Its host and viewer process clipboard and file I/O separately from screen delivery and connection responses. File transfers run in small bursts. Copied path strings remain text. The self test covers paths, delayed file lookups, and file contents. The session test checks that the host answers a heartbeat during a file transfer.
+
 ## Find and fix a problem
 
 - **Settings, activity indicators and preview:** `main.swift`, `Design.swift`, `UIPreview.swift`.
 - **Mac viewer, screen fitting and shortcuts:** `Viewer.swift`, `ReceiverMode.swift`, `InputBehavior.swift`, `TrackpadGestures.swift`.
 - **Host capture and input:** `Host.swift`, `VirtualDisplay.m`.
 - **Sound:** `Audio.swift`.
+- **Clipboard sharing:** `Clipboard.swift`.
 - **Pairing and update files:** `Pairing.swift`, `ReceiverUpdate.swift`.
 - **Windows UI, direct and relay transport:** `Link/`, `Link/ui/`, `Wire.swift`, `Relay/`.
 - **AI help and diagnostics:** `AgentSupport.swift`, `Link/ui/*-agent*.txt`.

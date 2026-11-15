@@ -550,6 +550,7 @@ func runSessionTest(output: URL) -> Never {
     testNativeStartupAfterScreenSaver()
     testScreenSaverRemoteAccess()
     testHostSound()
+    testSharedClipboard()
     print("PASS: no capture at idle, full-screen borders and bottom controls, cursor shape, eleven gesture actions, repaired keyboard shortcut, ⌘+Space and ⌘+Tab, encoder stopped")
     exit(0)
 }
@@ -860,6 +861,91 @@ private func testHostSound() {
     wait(4) { decodedFrames >= 40_000 }
     require(decodedFrames >= 40_000 && testToneShare(tail) > 0.9, "the viewer app asks for sound and decodes it")
     print("PASS: host sound reaches only viewers that ask for it, in order, and stops on request")
+}
+
+@available(macOS 14, *)
+private func testSharedClipboard() {
+    func require(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else { fputs("FAIL: \(message)\n", stderr); exit(1) }
+    }
+    func wait(_ seconds: TimeInterval, until ready: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !ready() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("ff-session-clipboard-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: base) }
+    let hostBoard = NSPasteboard.withUniqueName(), viewerBoard = NSPasteboard.withUniqueName()
+    defer { hostBoard.releaseGlobally(); viewerBoard.releaseGlobally() }
+    var localSocket: String?
+    var simulation = StudioHost.Simulation(displays: { wire, _ in
+        let display = DisplayInfo(id: 5, name: "Clipboard test", width: 1280, height: 800, localCursor: true, clipboard: true)
+        return [try Capture(info: display, retina: false, wire: wire, interactive: true)]
+    }, onInput: { _ in })
+    simulation.clipboard = (hostBoard, base.appendingPathComponent("host"))
+    let host = try! StudioHost(simulation: simulation) { _ in }
+    host.onReady = { localSocket = $0 }
+    try! host.start()
+    wait(3) { localSocket != nil }
+    require(localSocket != nil, "clipboard test listener opened")
+    defer { host.stop(); wait(0.1) }
+    var greeting = host.code
+    greeting.append(0)
+
+    // A viewer that never asks, like every viewer before 1.0.8, gets no parcel however often the host copies.
+    let wire = Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main)
+    var offered: DisplayInfo?
+    var parcels = 0
+    var ended = false
+    wire.onReady = { [weak wire] in wire?.send(.hello, data: greeting) }
+    wire.onMessage = { kind, _, data in
+        if kind == .screens { offered = (try? JSONDecoder().decode([DisplayInfo].self, from: data))?.first }
+        if kind == .parcel { parcels += 1 }
+    }
+    wire.onEnd = { _ in ended = true }
+    wire.start()
+    wait(10) { offered != nil }
+    require(offered?.clipboard == true, "host offers its clipboard")
+    hostBoard.clearContents()
+    hostBoard.setString("not for an old viewer", forType: .string)
+    wait(0.9)
+    require(parcels == 0 && !ended, "the clipboard stays home until the viewer asks")
+    wire.close()
+    wait(2) { host.activeDisplayCount == 0 }
+
+    let mode = ReceiverMode()
+    let viewer = StudioViewer(receiverMode: mode) { _ in }
+    viewer.matchInputSource = false
+    viewer.playsAudio = false
+    viewer.clipboardPlace = (viewerBoard, base.appendingPathComponent("viewer"))
+    var connected = false
+    viewer.onConnected = { connected = true }
+    defer { viewer.stop(); withExtendedLifetime(mode) {} }
+    viewer.receive(on: Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main), greeting: greeting)
+    wait(10) { connected }
+    require(connected, "viewer connected for the clipboard")
+    wait(0.6)
+    require(viewerBoard.string(forType: .string) == nil, "an earlier copy on the host is not sent on connecting")
+    viewerBoard.clearContents()
+    viewerBoard.setString("from the laptop", forType: .string)
+    wait(5) { hostBoard.string(forType: .string) == "from the laptop" }
+    require(hostBoard.string(forType: .string) == "from the laptop", "text copied on the viewer can be pasted on the host")
+    let note = base.appendingPathComponent("note.txt")
+    let contents = Data(repeating: 0x37, count: 2 * 1024 * 1024)
+    try! contents.write(to: note)
+    hostBoard.clearContents()
+    hostBoard.writeObjects([note as NSURL])
+    func received() -> [URL] {
+        (viewerBoard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+    }
+    wait(0.8)
+    viewer.sendHeartbeat()
+    wait(1) { viewer.roundTripMS != nil }
+    require(viewer.roundTripMS != nil && received().isEmpty, "heartbeat replies arrive before a large clipboard file completes")
+    wait(8) { received().count == 1 }
+    require(received().first.flatMap { try? Data(contentsOf: $0) } == contents,
+            "a file copied on the host can be pasted on the viewer")
+    print("PASS: clipboards are shared only with viewers that ask, in both directions, with text and files")
 }
 
 private let screenTestPoints = [

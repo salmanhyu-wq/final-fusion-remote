@@ -33,6 +33,8 @@ final class StudioHost {
         var screenSaverActive: (() -> Bool)? = nil
         var nativeDisplay: ((Wire, ReceiverNativePixels) throws -> Capture)? = nil
         var nativeModeReady: (() -> Bool)? = nil
+        /// A test's stand-in for this Mac's clipboard and the folder for files that arrive. Without it a simulated host shares none.
+        var clipboard: (pasteboard: NSPasteboard, folder: URL)? = nil
     }
 
     private let simulation: Simulation?
@@ -81,6 +83,7 @@ final class StudioHost {
     private var streamMode = LocalSetup.streamMode()
     private let control = HostInput()
     private let speaker = HostSpeakerMute()
+    private var clipboard: ClipboardShare?
     private var cursorTimer: DispatchSourceTimer?
     private var lastCursor: Int?
     let code: Data
@@ -246,6 +249,8 @@ final class StudioHost {
             userActivity = 0
         }
         speaker.restore()
+        clipboard?.stop()
+        clipboard = nil
         lastUserActivity = 0
     }
 
@@ -353,11 +358,31 @@ final class StudioHost {
                 }
                 return
             }
+            if input.action == .clipboard {
+                guard streams.contains(where: { $0.info.id == input.display && $0.info.clipboard == true }) else { return }
+                clipboard?.stop()
+                clipboard = nil
+                guard input.b == 1 else { return }
+                let place: (pasteboard: NSPasteboard, folder: URL)?
+                if let simulation = simulation { place = simulation.clipboard }
+                else { place = (.general, ClipboardShare.defaultFolder) }
+                guard let place = place else { return }
+                let share = ClipboardShare(pasteboard: place.pasteboard, folder: place.folder, send: { [weak wire] id, data in
+                    wire?.send(.parcel, screen: id, data: data) ?? false
+                }, hasRoom: { [weak wire] in wire?.hasVideoRoom(maxPending: 64 * 1024) ?? false })
+                clipboard = share
+                share.start()
+                return
+            }
             if let simulation = simulation { simulation.onInput(input) }
             else {
                 if input.action != .release && input.action != .inputSource { declareUserActivity() }
                 control.handle(input, capture: streams.first { $0.info.id == input.display })
             }
+        case .parcel:
+            guard !updateOnly else { return }
+            lastSeen = Date()
+            clipboard?.receive(id: screen, data: data)
         default: wire.close(L("잘못된 접속 메시지예요.", "Invalid connection message."))
         }
     }
@@ -908,7 +933,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                            videoFeedback: interactive ? true : nil, clipboardScreenshots: interactive ? true : nil,
                            nativePixels: nativePixels == nil ? nil : true,
                            cursorShapes: interactive ? true : nil,
-                           audio: interactive && index == 0 ? true : nil)
+                           audio: interactive && index == 0 ? true : nil,
+                           clipboard: interactive && index == 0 ? true : nil)
         try self.init(info: info, retina: retina || nativePixels != nil, wire: wire, interactive: interactive)
 
         let config = SCStreamConfiguration()
@@ -1395,7 +1421,7 @@ private final class HostInput {
         let flags = CGEventFlags(rawValue: input.flags & MacModifierKey.supportedFlags)
         switch input.action {
         case .release: release()
-        case .cursorShapes, .audio: break
+        case .cursorShapes, .audio, .clipboard: break
         case .inputSource:
             guard macInputMatching, let id = input.keyboardInputSource,
                   MacInputSource.validID(id), id != lastKeyboardRequest else { return }

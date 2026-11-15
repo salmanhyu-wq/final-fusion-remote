@@ -391,8 +391,176 @@ func runSelfTests() -> Never {
     check(heard.count >= 16_000 && testToneShare(Array(heard.suffix(9_600))) > 0.9, "host sound survives Opus packets in order")
     check(soundDecoder.decode(Data()) == nil && soundDecoder.decode(Data(repeating: 0, count: 9_000)) == nil,
           "oversized or empty sound packets are refused")
-    print("PASS: screen fitting, input events, update validation, pairing, transport, cursor shapes, host sound, system shortcut mode and agent guides")
+    checkClipboardSharing()
+    print("PASS: screen fitting, input events, update validation, pairing, transport, cursor shapes, host sound, shared clipboard, system shortcut mode and agent guides")
     exit(0)
+}
+
+/// Two clipboards joined the way a session joins them, with private pasteboards and folders.
+private func checkClipboardSharing() {
+    func check(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else { fputs("FAIL: \(message)\n", stderr); exit(1) }
+    }
+    func wait(_ seconds: TimeInterval = 5, until ready: () -> Bool = { false }) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !ready() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("ff-clipboard-" + UUID().uuidString, isDirectory: true)
+    let sourceFolder = base.appendingPathComponent("source", isDirectory: true)
+    let arrivals = base.appendingPathComponent("right", isDirectory: true)
+    try! fm.createDirectory(at: sourceFolder.appendingPathComponent("other"), withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: base) }
+    let left = NSPasteboard.withUniqueName(), right = NSPasteboard.withUniqueName()
+    defer { left.releaseGlobally(); right.releaseGlobally() }
+    var near: ClipboardShare?, far: ClipboardShare?
+    var returned = 0
+    let opened = DispatchSemaphore(value: 0)
+    let resumeFile = DispatchSemaphore(value: 0)
+    var nearSeen: [ClipboardShare.Activity] = [], farSeen: [ClipboardShare.Activity] = []
+    let a = ClipboardShare(pasteboard: left, folder: base.appendingPathComponent("left"), send: { id, data in
+        DispatchQueue.main.async { far?.receive(id: id, data: data) }
+        return true
+    }, hasRoom: { true }, readFileSize: { url in
+        if url.lastPathComponent == "slow-cloud-file" {
+            opened.signal()
+            _ = resumeFile.wait(timeout: .now() + 3)
+        }
+        return ClipboardShare.fileSize(url)
+    })
+    let b = ClipboardShare(pasteboard: right, folder: arrivals, send: { id, data in
+        DispatchQueue.main.async {
+            returned += 1
+            near?.receive(id: id, data: data)
+        }
+        return true
+    }, hasRoom: { true })
+    near = a
+    far = b
+    a.onActivity = { nearSeen.append($0) }
+    b.onActivity = { farSeen.append($0) }
+    left.clearContents()
+    left.setString("before the session", forType: .string)
+    a.start()
+    b.start()
+    defer { a.stop(); b.stop() }
+    wait(0.7)
+    check(right.string(forType: .string) == nil, "what was copied before the session stays put")
+
+    left.clearContents()
+    left.setString("안녕 hello", forType: .string)
+    wait { right.string(forType: .string) == "안녕 hello" }
+    check(right.string(forType: .string) == "안녕 hello", "copied text reaches the other clipboard")
+    let settled = left.changeCount
+    wait(0.9)
+    check(returned == 0 && left.changeCount == settled, "received text does not travel back")
+
+    right.clearContents()
+    right.setString("back", forType: .string)
+    wait { left.string(forType: .string) == "back" }
+    check(left.string(forType: .string) == "back" && returned > 0, "the other side's copy comes back the same way")
+
+    let picture = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 8, pixelsHigh: 8, bitsPerSample: 8, samplesPerPixel: 4,
+                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    picture.setColor(.red, atX: 3, y: 3)
+    let png = picture.representation(using: .png, properties: [:])!
+    left.clearContents()
+    left.setData(png, forType: .png)
+    wait { right.data(forType: .png) == png }
+    check(right.data(forType: .png) == png && right.data(forType: .tiff) != nil && right.string(forType: .string) == nil,
+          "a copied picture arrives as a picture")
+
+    var big = Data(count: 70_001)
+    for index in big.indices { big[index] = UInt8(truncatingIfNeeded: index &* 31 &+ index >> 8) }
+    let files = [sourceFolder.appendingPathComponent("보고서.txt"), sourceFolder.appendingPathComponent("empty.dat"),
+                 sourceFolder.appendingPathComponent("other/보고서.txt")]
+    try! big.write(to: files[0])
+    try! Data().write(to: files[1])
+    try! Data("second".utf8).write(to: files[2])
+    func arrived() -> [URL] {
+        (right.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+    }
+    left.clearContents()
+    left.writeObjects(files as [NSURL])
+    wait { arrived().count == 3 }
+    let got = arrived()
+    check(got.count == 3 && got.allSatisfy { $0.standardizedFileURL.path.hasPrefix(arrivals.standardizedFileURL.path + "/") },
+          "copied files arrive inside the receiving folder")
+    check(got.map(\.lastPathComponent) == ["보고서.txt", "empty.dat", "보고서 2.txt"] &&
+          (try? Data(contentsOf: got[0])) == big && (try? Data(contentsOf: got[1]))?.isEmpty == true &&
+          (try? Data(contentsOf: got[2])) == Data("second".utf8), "file contents and names survive, with duplicates renamed")
+    check(nearSeen.contains(.sent(files: 3)) && farSeen.contains(.received(files: 3)), "both sides learn when files are ready to paste")
+
+    let fileAddress = files[0].absoluteString
+    for path in [sourceFolder.path, fileAddress] {
+        let item = NSPasteboardItem()
+        item.setString(path, forType: .string)
+        if path == fileAddress { item.setString(path, forType: .URL) }
+        left.clearContents()
+        left.writeObjects([item])
+        wait { right.string(forType: .string) == path }
+        check(right.string(forType: .string) == path && arrived().isEmpty,
+              "a copied pathname or generic URL is shared as text without reading the file")
+    }
+
+    let slowFile = sourceFolder.appendingPathComponent("slow-cloud-file")
+    try! Data("slow file".utf8).write(to: slowFile)
+    left.clearContents()
+    let lookupDeadline = DispatchTime.now() + .seconds(2)
+    left.writeObjects([slowFile as NSURL])
+    var fileLookupStarted = false
+    wait(1.5) {
+        if opened.wait(timeout: .now()) == .success { fileLookupStarted = true }
+        return fileLookupStarted
+    }
+    check(fileLookupStarted, "the file lookup starts")
+    var heartbeat = false
+    DispatchQueue.main.async { heartbeat = true }
+    wait(0.2) { heartbeat }
+    check(heartbeat && DispatchTime.now() < lookupDeadline && arrived().isEmpty,
+          "the session queue stays responsive while a file lookup waits")
+    resumeFile.signal()
+    wait { arrived().first?.lastPathComponent == "slow-cloud-file" && farSeen.contains(.received(files: 1)) }
+    check(arrived().first.flatMap { try? Data(contentsOf: $0) } == Data("slow file".utf8),
+          "a delayed file still arrives intact after the lookup resumes")
+
+    let unchanged = right.changeCount
+    left.clearContents()
+    left.writeObjects([sourceFolder as NSURL])
+    wait { farSeen.contains(.skipped) }
+    check(nearSeen.contains(.skipped) && farSeen.contains(.skipped) && right.changeCount == unchanged,
+          "a copied folder is refused and both sides are told")
+
+    let secret = NSPasteboardItem()
+    secret.setString("hunter2", forType: .string)
+    secret.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+    left.clearContents()
+    left.writeObjects([secret])
+    wait(0.9)
+    check(right.changeCount == unchanged, "a password manager's concealed copy stays on its Mac")
+
+    // A header from the wire cannot place a file outside the folder or exceed the limits.
+    let escape = try! JSONEncoder().encode(ParcelHeader(parts: [.init(type: "file", size: 3, name: "../../escape.txt")]))
+    b.receive(id: 900, data: Data([ParcelPhase.begin.rawValue]) + escape)
+    b.receive(id: 900, data: Data([ParcelPhase.chunk.rawValue]) + Data("abc".utf8))
+    b.receive(id: 900, data: Data([ParcelPhase.end.rawValue]))
+    wait { arrived().map(\.lastPathComponent) == ["escape.txt"] }
+    check(arrived().map(\.lastPathComponent) == ["escape.txt"] &&
+          arrived().first?.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL == arrivals.standardizedFileURL,
+          "a path in a file name is reduced to a plain name")
+    let afterEscape = right.changeCount
+    let huge = try! JSONEncoder().encode(ParcelHeader(parts: [.init(type: "file", size: ClipboardShare.maxFiles + 1, name: "huge")]))
+    b.receive(id: 901, data: Data([ParcelPhase.begin.rawValue]) + huge)
+    b.receive(id: 901, data: Data([ParcelPhase.end.rawValue]))
+    let extra = try! JSONEncoder().encode(ParcelHeader(parts: [.init(type: "text", size: 2)]))
+    b.receive(id: 902, data: Data([ParcelPhase.begin.rawValue]) + extra)
+    b.receive(id: 902, data: Data([ParcelPhase.chunk.rawValue]) + Data("too long".utf8))
+    b.receive(id: 902, data: Data([ParcelPhase.end.rawValue]))
+    b.receive(id: 903, data: Data([ParcelPhase.skipped.rawValue]))
+    let expectedSkips = farSeen.filter { $0 == .skipped }.count + 1
+    wait { farSeen.filter { $0 == .skipped }.count == expectedSkips }
+    check(farSeen.filter { $0 == .skipped }.count == expectedSkips && right.changeCount == afterEscape,
+          "oversized or overflowing parcels are dropped")
 }
 
 /// 440 Hz on both channels, the way a capture stream delivers sound.

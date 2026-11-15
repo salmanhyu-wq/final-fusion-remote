@@ -58,6 +58,11 @@ final class StudioViewer {
     /// A test receives the decoded host sound here instead of hearing it.
     var onAudioDecoded: ((AVAudioPCMBuffer) -> Void)?
     private var audio: AudioPlayer?
+    var sharesClipboard = true
+    /// A test swaps in its own clipboard and folder.
+    var clipboardPlace: (pasteboard: NSPasteboard, folder: URL) = (.general, ClipboardShare.defaultFolder)
+    private var clipboard: ClipboardShare?
+    private var clipboardPercent = -1
     var screenMargin: CGFloat = 0
     private var lastKeyboardSource: String?
     private var inputSourceObserver: NSObjectProtocol?
@@ -66,7 +71,7 @@ final class StudioViewer {
     var onUpdateReady: ((URL, ReceiverUpdateOffer) -> Void)?
     var onUpdateVersion: ((ReceiverUpdateVersion) -> Void)?
     private let modifiers = MacModifierState()
-    private var roundTripMS: Int?
+    private(set) var roundTripMS: Int?
     var onStopped: (() -> Void)?
     var onConnected: (() -> Void)?
     var onVideoSample: ((RemoteView, CMSampleBuffer) -> Void)?
@@ -332,6 +337,8 @@ final class StudioViewer {
         lastKeyboardSource = nil
         audio?.stop()
         audio = nil
+        clipboard?.stop()
+        clipboard = nil
         acceptsUpdates = false
         updateDownload = nil
         receiverMode?.display([])
@@ -370,6 +377,15 @@ final class StudioViewer {
             if playsAudio, AudioPlayer.isAvailable, let host = displays.first(where: { $0.audio == true }) {
                 audio = AudioPlayer(onDecoded: onAudioDecoded)
                 send(Input(action: .audio, display: host.id, b: 1))
+            }
+            if sharesClipboard, let wire = wire, let host = displays.first(where: { $0.clipboard == true }) {
+                send(Input(action: .clipboard, display: host.id, b: 1))
+                let share = ClipboardShare(pasteboard: clipboardPlace.pasteboard, folder: clipboardPlace.folder, send: { [weak wire] id, data in
+                    wire?.send(.parcel, screen: id, data: data) ?? false
+                }, hasRoom: { [weak wire] in wire?.hasVideoRoom(maxPending: 64 * 1024) ?? false })
+                share.onActivity = { [weak self] in self?.showClipboardActivity($0) }
+                clipboard = share
+                share.start()
             }
             if let receiverMode = receiverMode {
                 let nativeCaps = matchInputSource && MacInputSource.usesSystemCapsSwitch && MacInputSource.koreanPair() != nil
@@ -452,6 +468,9 @@ final class StudioViewer {
         case .audio:
             guard sawScreens else { return }
             audio?.receive(data, number: id)
+        case .parcel:
+            guard sawScreens else { return }
+            clipboard?.receive(id: id, data: data)
         case .cursor:
             guard sawScreens, let cursor = CursorShape(data)?.cursor else { return }
             for view in views.values { view.remoteCursor = cursor }
@@ -466,6 +485,37 @@ final class StudioViewer {
             status(L("6자리 번호 \(code) · 보내는 맥에 이 번호를 입력하고 ‘허용’을 누르세요.", "6-digit code \(code) · Enter this on the host Mac and click “Allow”."))
         default: stop(L("연결 데이터를 읽지 못했어요. 다시 연결해 주세요.", "Couldn't read the connection data. Please connect again."))
         }
+    }
+
+    /// Copied files take a moment to cross, so the remote screen says when a paste is ready.
+    private func showClipboardActivity(_ activity: ClipboardShare.Activity) {
+        let text: String
+        switch activity {
+        case let .sending(files, progress), let .receiving(files, progress):
+            let percent = Int(progress * 100)
+            guard percent != clipboardPercent else { return }
+            clipboardPercent = percent
+            if case .sending = activity {
+                text = L("파일 \(files)개를 보내는 맥으로 보내는 중 · \(percent)%", "Sending \(files) file(s) to the host Mac · \(percent)%")
+            } else {
+                text = L("보내는 맥의 파일 \(files)개를 받는 중 · \(percent)%", "Receiving \(files) file(s) from the host Mac · \(percent)%")
+            }
+        case let .sent(files):
+            clipboardPercent = -1
+            text = L("파일 \(files)개를 보냈어요. 보내는 맥에서 붙여넣으세요.", "Sent \(files) file(s). Paste them on the host Mac.")
+        case let .received(files):
+            clipboardPercent = -1
+            text = L("파일 \(files)개를 받았어요. 이 맥에서 붙여넣으세요.", "Received \(files) file(s). Paste them on this Mac.")
+        case .skipped:
+            clipboardPercent = -1
+            text = L("폴더, 65개 이상, 합쳐서 200MB가 넘는 파일은 복사해서 보낼 수 없어요.",
+                     "Folders, more than 64 files, or over 200 MB in total can't be sent by copying.")
+        case .interrupted:
+            clipboardPercent = -1
+            text = L("파일 복사가 끝나지 않았어요. 파일을 다시 복사해 주세요.",
+                     "File copying did not finish. Please copy the files again.")
+        }
+        for view in views.values { view.showNotice(text) }
     }
 
     private func recordVideo(id: UInt32, count: Int, needsKeyframe: Bool) {
@@ -914,6 +964,40 @@ final class RemoteView: NSView {
         return sample
     }
 
+    private var notice: NSTextField?
+    private var noticeHide: DispatchWorkItem?
+
+    /// A short message over the remote screen that fades by itself.
+    func showNotice(_ text: String) {
+        noticeHide?.cancel()
+        let label: NSTextField
+        if let existing = notice {
+            label = existing
+        } else {
+            label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: 15, weight: .medium)
+            label.textColor = .white
+            label.alignment = .center
+            label.drawsBackground = true
+            label.backgroundColor = NSColor.black.withAlphaComponent(0.78)
+            label.wantsLayer = true
+            label.layer?.cornerRadius = 9
+            label.layer?.masksToBounds = true
+            label.layer?.zPosition = 10
+            addSubview(label)
+            notice = label
+        }
+        label.stringValue = text
+        label.sizeToFit()
+        let size = CGSize(width: min(bounds.width - 40, label.frame.width + 36), height: label.frame.height + 14)
+        let top = isFlipped ? bounds.minY + 28 : bounds.maxY - size.height - 28
+        label.frame = CGRect(x: bounds.midX - size.width / 2, y: top, width: size.width, height: size.height)
+        label.isHidden = false
+        let hide = DispatchWorkItem { [weak label] in label?.isHidden = true }
+        noticeHide = hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: hide)
+    }
+
     fileprivate func setConnectionDelayed(_ delayed: Bool) {
         if delayed { refreshFeedbackPosition() }
         pointerFeedback.setConnectionDelayed(delayed)
@@ -1022,6 +1106,38 @@ final class RemoteView: NSView {
     @objc private func copyEntireSenderScreen() {
         endScreenshotSelection()
         send?(Input(action: .screenshotFull, display: display.id))
+        confirmCapture(displayedRect)
+    }
+
+    private static let captureSound: NSSound? = {
+        let folder = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/"
+        return ["Screen Capture.aif", "Grab.aif"].lazy.compactMap { NSSound(contentsOfFile: folder + $0, byReference: true) }.first
+    }()
+
+    /// Copying the remote screen shows nothing by itself, so the copied area blinks once and the camera sound plays,
+    /// the way a screenshot on this Mac does. The sound follows the system's “Play user interface sound effects” setting.
+    private func confirmCapture(_ area: CGRect) {
+        let globals = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)
+        if globals?["com.apple.sound.uiaudio.enabled"] as? Bool ?? true, let sound = Self.captureSound {
+            sound.stop()
+            sound.play()
+        }
+        guard let layer = layer, area.width > 0, area.height > 0 else { return }
+        let flash = CALayer()
+        flash.frame = area
+        flash.backgroundColor = NSColor.white.cgColor
+        flash.opacity = 0
+        flash.zPosition = 8
+        layer.addSublayer(flash)
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.15 : 0.45
+        fade.toValue = 0
+        fade.duration = 0.3
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { flash.removeFromSuperlayer() }
+        flash.add(fade, forKey: "flash")
+        CATransaction.commit()
     }
 
     @objc private func selectSenderScreenshot() {
@@ -1081,6 +1197,8 @@ final class RemoteView: NSView {
             input.screenshotRegion = ScreenshotRegion(first: Self.position(start, in: area),
                                                      last: Self.position(position, in: area))
             send?(input)
+            confirmCapture(CGRect(x: min(start.x, position.x), y: min(start.y, position.y),
+                                  width: abs(start.x - position.x), height: abs(start.y - position.y)))
         default: break
         }
     }

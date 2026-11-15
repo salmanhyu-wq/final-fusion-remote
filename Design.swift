@@ -153,6 +153,78 @@ final class ActionButton: NSButton {
 }
 
 /// A visible activity cue, independent of the localized status message.
+/// A tiny “?” beside a setting. A click opens a short plain-language note that closes by itself.
+final class HelpBubble: NSButton {
+    private let note: String
+    private var popover: NSPopover?
+    private var closing: DispatchWorkItem?
+    var isOpen: Bool { popover?.isShown == true }
+    /// The size of the open note, for the UI preview's check.
+    var openSize: CGSize? { isOpen ? popover?.contentSize : nil }
+
+    init(_ note: String) {
+        self.note = note
+        super.init(frame: .zero)
+        isBordered = false
+        title = ""
+        let size = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        image = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: nil)?.withSymbolConfiguration(size)
+        imagePosition = .imageOnly
+        contentTintColor = .tertiaryLabelColor
+        target = self
+        action = #selector(toggle)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setAccessibilityLabel(L("설명 보기", "Show explanation"))
+        setAccessibilityHelp(note)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// The bubble's contents, also drawn by the UI preview.
+    static func content(_ note: String) -> NSView {
+        let label = NSTextField(wrappingLabelWithString: note)
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .labelColor
+        // A popover gives its contents no width of its own, and a wrapping label then collapses to a sliver.
+        let width = min(260, ceil(label.attributedStringValue.size().width) + 6)
+        label.preferredMaxLayoutWidth = width
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let box = NSView()
+        box.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 13),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -13),
+            label.topAnchor.constraint(equalTo: box.topAnchor, constant: 11),
+            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -11),
+            label.widthAnchor.constraint(equalToConstant: width)
+        ])
+        box.layoutSubtreeIfNeeded()
+        box.setFrameSize(box.fittingSize)
+        return box
+    }
+
+    @objc private func toggle() {
+        closing?.cancel()
+        if let open = popover, open.isShown {
+            open.close()
+            return
+        }
+        let bubble = NSPopover()
+        // A click anywhere else closes it.
+        bubble.behavior = .transient
+        let controller = NSViewController()
+        controller.view = Self.content(note)
+        bubble.contentViewController = controller
+        bubble.contentSize = controller.view.fittingSize
+        bubble.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
+        popover = bubble
+        let work = DispatchWorkItem { [weak bubble] in bubble?.close() }
+        closing = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9, execute: work)
+    }
+}
+
 enum OperationActivity: Equatable {
     case idle, busy, progress(Double)
 }

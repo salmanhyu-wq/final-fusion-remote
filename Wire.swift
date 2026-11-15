@@ -12,6 +12,8 @@ enum Kind: UInt8 {
     case cursor
     /// Host system sound, one Opus packet per message (SessionAudio). Sent only to receivers that opted in with Input.Action.audio.
     case audio
+    /// One step of a clipboard parcel (ParcelPhase), in either direction. Used only after the receiver sent Input.Action.clipboard.
+    case parcel
 }
 
 struct DisplayInfo: Codable {
@@ -36,6 +38,8 @@ struct DisplayInfo: Codable {
     var cursorShapes: Bool? = nil
     /// The host can send its system sound; receivers opt in with Input.Action.audio.
     var audio: Bool? = nil
+    /// The host can share clipboards; receivers opt in with Input.Action.clipboard.
+    var clipboard: Bool? = nil
 }
 
 struct ReceiverDisplayOptions {
@@ -225,6 +229,8 @@ struct Input: Codable {
         case cursorShapes
         /// Receiver switch for host sound: b is 1 to start, 0 to stop. Older hosts ignore it.
         case audio
+        /// Receiver switch for clipboard sharing: b is 1 to start, 0 to stop. Older hosts ignore it.
+        case clipboard
     }
 
     let action: Action

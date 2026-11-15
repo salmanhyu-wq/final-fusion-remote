@@ -34,6 +34,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                                          target: nil, action: nil)
     private let hostSound = NSButton(checkboxWithTitle: L("보내는 맥의 소리 듣기", "Play the host Mac's sound"),
                                      target: nil, action: nil)
+    private let sharedClipboard = NSButton(checkboxWithTitle: L("복사한 글·그림·파일 함께 쓰기", "Share copied text, pictures and files"),
+                                           target: nil, action: nil)
     private let diagnostics = NSButton(checkboxWithTitle: L("연결 상태를 보내는 맥에 알려 주기",
                                                             "Share connection stats with the host Mac"),
                                        target: nil, action: nil)
@@ -125,6 +127,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             SessionKeyboardLayout.recover()
             HostSpeakerMute.recover()
         }
+        ClipboardShare.removeOldFiles()
         let menu = NSMenu()
         let menuItem = NSMenuItem()
         menu.addItem(menuItem)
@@ -241,6 +244,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(remoteTuning.state == .on, forKey: "AllowRemoteReceiverTuning")
         UserDefaults.standard.set(inputLanguage.state == .off, forKey: "KeepSenderInputSource")
         UserDefaults.standard.set(hostSound.state == .off, forKey: "MuteHostSound")
+        UserDefaults.standard.set(sharedClipboard.state == .off, forKey: "KeepClipboardLocal")
     }
 
     @objc private func showReceiverDiagnostics() {
@@ -409,7 +413,12 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         hostSound.target = self
         hostSound.action = #selector(saveReceiverOptions)
         hostSound.toolTip = L("다음 연결부터 적용돼요.", "Applies from the next connection.")
-        for box in [login, inputLanguage, hostSound, diagnostics, remoteTuning, directEnabled] {
+        sharedClipboard.state = UserDefaults.standard.bool(forKey: "KeepClipboardLocal") ? .off : .on
+        sharedClipboard.target = self
+        sharedClipboard.action = #selector(saveReceiverOptions)
+        sharedClipboard.toolTip = L("연결 중에 한쪽에서 복사한 것을 다른 쪽에서 붙여넣어요. 다음 연결부터 적용돼요.",
+                                    "Paste on one Mac what you copied on the other while connected. Applies from the next connection.")
+        for box in [login, inputLanguage, hostSound, sharedClipboard, diagnostics, remoteTuning, directEnabled] {
             box.font = .systemFont(ofSize: 14)
         }
 
@@ -557,14 +566,18 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         column(sharingControls, [
             sharingLine,
             row([startHost.set(L("보내기 시작", "Start sharing"), symbol: "play.fill", target: self, action: #selector(beginHosting)),
-                 endHost.set(L("송신 중지", "Stop sharing"), symbol: "stop.fill", target: self, action: #selector(confirmStopHosting))]),
+                 endHost.set(L("송신 중지", "Stop sharing"), symbol: "stop.fill", target: self, action: #selector(confirmStopHosting)),
+                 HelpBubble(L("‘보내기 시작’을 누르면 내가 허락한 다른 컴퓨터에서 이 맥의 화면을 볼 수 있어요. ‘송신 중지’를 누르면 아무도 볼 수 없어요.",
+                              "After “Start sharing”, the computers you allowed can see this Mac's screen. After “Stop sharing”, nobody can."))]),
             permissionPanel()
         ])
         column(approvalControls, [
             approvalText,
             row([pairNumber,
                  allow.set(L("허용", "Allow"), symbol: "checkmark", target: self, action: #selector(allowPair)),
-                 deny.set(L("거절", "Deny"), symbol: "xmark", target: self, action: #selector(denyPair))])
+                 deny.set(L("거절", "Deny"), symbol: "xmark", target: self, action: #selector(denyPair)),
+                 HelpBubble(L("처음 연결하려는 컴퓨터가 내 것이 맞는지 확인해요. 그 컴퓨터 화면에 나온 숫자 여섯 개를 여기에 적고 ‘허용’을 누르세요. 모르는 요청이면 ‘거절’을 누르세요.",
+                              "Checks that a computer connecting for the first time is really yours. Type the six numbers shown on that computer and click “Allow”. If you don't recognise the request, click “Deny”."))])
         ])
         let status = card(L("화면 보내기", "Sharing"), "dot.radiowaves.left.and.right", [column(manualSharingSlot, [])], tone: .featured)
         let approval = card(L("새 기기 허용", "Allow a new device"), "checkmark.shield", [column(manualApprovalSlot, [])], tone: .section)
@@ -572,15 +585,24 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         let viewers = card(L("받는 기기", "Viewer devices"), "laptopcomputer", [
             hint(L("받는 앱을 만들어 다른 맥이나 Windows PC에서 여세요. 먼저 ‘보내기 시작’을 눌러야 만들 수 있어요.",
                    "Create the viewer app and open it on another Mac or Windows PC. Start sharing first.")),
-            row([exportApps.set(L("받는 앱 만들기", "Create viewer apps"), symbol: "square.and.arrow.down",
-                                target: self, action: #selector(exportReceivers)),
-                 ActionButton(.quiet).set(L("연결 상태", "Connection info"), symbol: "waveform.path.ecg",
-                                          target: self, action: #selector(showReceiverDiagnostics))]),
-            row([diySendButton(at: 0)]), updateNotes[0], exportLines[0], updateLines[0]
+            row([explained(exportApps.set(L("받는 앱 만들기", "Create viewer apps"), symbol: "square.and.arrow.down",
+                                          target: self, action: #selector(exportReceivers)),
+                           "다른 컴퓨터에서 이 맥을 볼 때 쓰는 앱을 만들어요. 만들어진 파일을 그 컴퓨터로 옮겨서 열면 돼요. 이 파일은 내 컴퓨터에만 주세요.",
+                           "Makes the app another computer needs to see this Mac. Move the file to that computer and open it. Give it only to your own computers."),
+                 explained(ActionButton(.quiet).set(L("연결 상태", "Connection info"), symbol: "waveform.path.ecg",
+                                                    target: self, action: #selector(showReceiverDiagnostics)),
+                           "지금 연결이 빠른지 느린지 보여 줘요. 화면이 뚝뚝 끊길 때 살펴보세요.",
+                           "Shows whether the connection is fast or slow right now. Look here when the picture stutters.")]),
+            row([explained(diySendButton(at: 0),
+                           "다른 컴퓨터에 깔린 ‘받는 앱’을 새것으로 바꿔 줘요. 그 컴퓨터가 연결되면 저절로 보내니 기다리면 돼요.",
+                           "Replaces the viewer app on your other computer with the newest one. It is sent by itself when that computer connects.")]),
+            updateNotes[0], exportLines[0], updateLines[0]
         ])
         let relayLabel = NSTextField(labelWithString: L("연결 서버", "Connection server"))
         relayLabel.font = .systemFont(ofSize: 14, weight: .medium)
         let relayRow = row([relayLabel, relayAddress,
+                            HelpBubble(L("멀리 떨어진 두 컴퓨터를 이어 주는 ‘다리’의 주소예요. 처음 한 번만 넣으면 돼요. ‘설정 안내 복사’를 눌러 AI 도우미에 붙여넣으면 대신 만들어 줘요.",
+                                         "The address of the “bridge” that joins your two computers from far apart. You enter it once. Click “Copy setup guide” and paste it into an AI assistant to have it made for you.")),
                             ActionButton().set(L("설정 안내 복사", "Copy setup guide"), symbol: "doc.on.doc",
                                                target: self, action: #selector(copySetupGuide))])
         relayRow.alignment = .centerY
@@ -588,7 +610,11 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             relayRow,
             hint(L("처음 한 번만: ‘설정 안내 복사’를 누르고 AI 도우미에 붙여넣으면 연결 서버를 만들어 줘요.",
                    "One-time setup: click “Copy setup guide” and paste it into an AI assistant on this Mac to set up the connection server.")),
-            login, loginStatus, directEnabled,
+            explained(login, "이 맥을 켜면 파이널 퓨전이 저절로 열려요. 집에 아무도 없어도 밖에서 연결할 수 있어요.",
+                      "Final Fusion opens by itself when this Mac starts, so you can connect from outside even when nobody is home."),
+            loginStatus,
+            explained(directEnabled, "두 컴퓨터가 ‘다리’를 거치지 않고 곧바로 이어져요. 더 빠르고 또렷해요. 곧바로 안 될 때는 저절로 다리를 거쳐 이어지니 켜 두세요.",
+                      "The two computers join straight to each other instead of over the “bridge”: faster and sharper. When that isn't possible the bridge is used by itself, so leave this on."),
             hint(L("권장 인터넷 속도 · 올리기 25 Mbps, 내려받기 2 Mbps", "Recommended internet speed · 25 Mbps up, 2 Mbps down"))
         ])
         relayRow.widthAnchor.constraint(equalTo: settings.stack.widthAnchor).isActive = true
@@ -599,12 +625,16 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         var controls: [NSView] = [
             viewingLine,
             row([connect.set(L("연결하기", "Connect"), symbol: "play.fill", target: self, action: #selector(beginViewing)),
-                 disconnect.set(L("취소", "Cancel"), symbol: "xmark", target: self, action: #selector(stopViewing))])
+                 disconnect.set(L("취소", "Cancel"), symbol: "xmark", target: self, action: #selector(stopViewing)),
+                 HelpBubble(L("‘연결하기’를 누르면 멀리 있는 맥의 화면이 이 컴퓨터에 나타나요. 그 맥 앞에 앉은 것처럼 쓸 수 있어요. 연결을 기다리다 그만두려면 ‘취소’를 누르세요.",
+                              "“Connect” brings the far-away Mac's screen onto this computer, and you use it as if you were sitting at that Mac. “Cancel” stops waiting for the connection."))])
         ]
         if receiver != nil {
             controls.append(row([
-                checkUpdate.set(L("DIY 업데이트 확인", "Check for DIY update"), symbol: "arrow.clockwise",
-                                target: self, action: #selector(checkReceiverUpdate)),
+                explained(checkUpdate.set(L("DIY 업데이트 확인", "Check for DIY update"), symbol: "arrow.clockwise",
+                                          target: self, action: #selector(checkReceiverUpdate)),
+                          "이 앱의 새것이 나왔는지 알아보고, 나왔으면 저절로 새것으로 바꿔 줘요. 가끔 한 번씩 눌러 주면 좋아요.",
+                          "Looks for a newer version of this app and, if there is one, swaps it in by itself. Worth a click now and then."),
                 installUpdate.set(L("DIY 업데이트 다시 설치", "Retry DIY update"), symbol: "arrow.down.circle",
                                   target: self, action: #selector(installReceivedUpdate))
             ]))
@@ -622,17 +652,37 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         let qualityLabel = NSTextField(labelWithString: L("화질", "Quality"))
         let sizeLabel = NSTextField(labelWithString: L("크기", "Size"))
         for label in [qualityLabel, sizeLabel] { label.font = .systemFont(ofSize: 14, weight: .medium) }
-        let displayRow = row([qualityLabel, quality, sizeLabel, screenEdge])
+        let qualityHelp = HelpBubble(L("화면이 얼마나 또렷하게 보일지 골라요. 높을수록 글씨가 또렷하지만, 인터넷이 느리면 화면이 끊길 수 있어요. 잘 모르겠으면 ‘중간’으로 두세요.",
+                                       "How clear the picture looks. Higher makes text clearer, but on slow internet the picture may stutter. If unsure, leave it on Medium."))
+        let sizeHelp = HelpBubble(L("멀리 있는 맥의 화면을 이 컴퓨터 화면에 꽉 차게 볼지, 둘레를 조금 비워 둘지 골라요. 화면 끝이 잘려 보이면 ‘테두리 조금 남기기’를 고르세요.",
+                                    "Show the far-away Mac's screen edge to edge, or leave a little room around it. If the edges look cut off, choose “Leave a small border”."))
+        let displayRow = row([qualityLabel, quality, qualityHelp, sizeLabel, screenEdge, sizeHelp])
         displayRow.alignment = .centerY
-        displayRow.setCustomSpacing(18, after: quality)
+        displayRow.setCustomSpacing(18, after: qualityHelp)
         cards.append(card(L("화면", "Display"), "rectangle.on.rectangle", [displayRow]))
         cards.append(card(L("옵션", "Options"), "slider.horizontal.3",
-                          [inputLanguage, hostSound, diagnostics, remoteTuning, login, loginStatus], tone: .section))
+                          [explained(inputLanguage, "여기서 한글과 영어를 바꾸면 멀리 있는 맥도 똑같이 바뀌어요. 켜 두면 글자가 엉뚱하게 쳐지는 일이 줄어요.",
+                                     "When you switch between Korean and English here, the far-away Mac switches too. Leaving it on means fewer wrongly typed letters."),
+                           explained(hostSound, "멀리 있는 맥에서 나는 소리(영상, 음악, 알림)를 이 컴퓨터에서 들어요. 그동안 멀리 있는 맥에서는 소리가 나지 않아요.",
+                                     "Hear the far-away Mac's sound (videos, music, alerts) on this computer. Meanwhile the far-away Mac itself stays silent."),
+                           explained(sharedClipboard, "한쪽 컴퓨터에서 ‘복사’한 글·사진·파일을 다른 쪽 컴퓨터에서 ‘붙여넣기’ 할 수 있어요. 두 컴퓨터 사이로 물건을 건네주는 것과 같아요.",
+                                     "What you Copy on one computer (text, pictures, files) you can Paste on the other. It is like handing things across between the two."),
+                           explained(diagnostics, "연결이 잘 되고 있는지를 멀리 있는 맥에 알려 줘요. 화면 크기와 속도 같은 숫자만 보내고, 화면이 끊길 때 왜 그런지 찾기 쉬워져요.",
+                                     "Tells the far-away Mac how well the connection is going. Only numbers such as screen size and speed are sent, and they make a stuttering picture easier to explain."),
+                           explained(remoteTuning, "멀리 있는 맥 쪽에서 화면의 또렷한 정도를 대신 바꿔 줄 수 있게 허락해요. 도와주는 사람이 대신 맞춰 줄 때 켜세요. 바로 위 항목이 켜져 있어야 해요.",
+                                     "Allows the far-away Mac to change how clear the picture is for you. Turn it on when someone is helping you set things up. The option just above must be on."),
+                           explained(login, "이 컴퓨터를 켜면 이 앱이 저절로 열려요. 매번 앱을 찾아서 누르지 않아도 돼요.",
+                                     "This app opens by itself when the computer starts, so you don't have to find and open it each time."),
+                           loginStatus], tone: .section))
         cards.append(row([
-            ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
-                               target: self, action: #selector(enableReceiverInput)),
-            ActionButton().set(L("도움말 복사", "Copy help"), symbol: "doc.on.doc",
-                               target: self, action: #selector(copyViewerFix))
+            explained(ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
+                                         target: self, action: #selector(enableReceiverInput)),
+                      "창 바꾸기(⌘+Tab)나 찾기(⌘+Space) 같은 키를 눌렀을 때, 이 컴퓨터가 아니라 멀리 있는 맥이 알아듣게 해요. 처음 한 번만 화면에 나오는 대로 허용해 주세요.",
+                      "Makes keys such as switching windows (⌘+Tab) and searching (⌘+Space) work on the far-away Mac instead of this computer. The first time, allow what the screen asks for."),
+            explained(ActionButton().set(L("도움말 복사", "Copy help"), symbol: "doc.on.doc",
+                                         target: self, action: #selector(copyViewerFix)),
+                      "이 컴퓨터의 상태를 글로 복사해요. 도와주는 사람이나 AI 도우미에게 붙여넣어 보여 주면 문제를 찾기 쉬워요.",
+                      "Copies a description of how this computer is doing. Paste it for a helper or an AI assistant so the problem is easier to find.")
         ]))
         cards.append(hint(L("원격 화면에서 설정으로 돌아오기: ", "Return to settings from the remote screen: ")
                           + ReceiverMode.exitKeys + "\n"
@@ -705,16 +755,24 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         let setup = card(L("① 시작 준비", "① Get ready"), "bolt.horizontal.circle", [
             hint(L("AI 도우미가 연결 서버를 만들고 보내기를 시작해요. 로그인과 macOS 허용만 해 주세요.",
                    "The AI assistant sets up the connection server and starts sharing. You only sign in and allow macOS settings.")),
-            row([prepareGuide.set(L("① 안내 복사", "Copy step ①"), symbol: "doc.on.doc", target: self, action: #selector(copySetupGuide))]),
+            row([explained(prepareGuide.set(L("① 안내 복사", "Copy step ①"), symbol: "doc.on.doc", target: self, action: #selector(copySetupGuide)),
+                           "처음 쓸 준비를 도와주는 글이 복사돼요. AI 도우미(Claude 등)를 열고 붙여넣으면, 필요한 준비를 차례대로 대신 해 줘요.",
+                           "Copies a note that gets everything ready. Open an AI assistant (Claude, for example), paste it, and it does the preparation step by step.")]),
             column(agentSharingSlot, [])
         ], tone: .featured)
         agentSetupCard = setup
-        let targetRow = row([targetPopup, sendGuide.set(L("② 안내 복사", "Copy step ②"), symbol: "paperplane", target: self, action: #selector(copyViewerGuide))])
+        let targetRow = row([targetPopup, sendGuide.set(L("② 안내 복사", "Copy step ②"), symbol: "paperplane", target: self, action: #selector(copyViewerGuide)),
+                             HelpBubble(L("이 맥의 화면을 볼 컴퓨터가 어떤 종류인지 고르고 버튼을 누르세요. AI 도우미에 붙여넣으면, 그 컴퓨터에 깔 앱을 이메일로 보내 줘요.",
+                                          "Pick what kind of computer will show this Mac's screen, then click the button. Paste into an AI assistant and it emails the app for that computer."))])
         targetRow.alignment = .centerY
         let viewers = card(L("② 받는 앱 보내기", "② Send the viewer app"), "paperplane", [
             hint(L("받는 컴퓨터를 고르세요. AI 도우미가 이메일 주소를 묻고 맞는 앱과 연결 방법을 보내요.",
                    "Pick the viewing computer. The AI assistant asks for an email address and sends the right app.")),
-            targetRow, row([diySendButton(at: 1)]), updateNotes[1], exportLines[1], updateLines[1]
+            targetRow,
+            row([explained(diySendButton(at: 1),
+                           "다른 컴퓨터에 깔린 ‘받는 앱’을 새것으로 바꿔 줘요. 그 컴퓨터가 연결되면 저절로 보내니 기다리면 돼요.",
+                           "Replaces the viewer app on your other computer with the newest one. It is sent by itself when that computer connects.")]),
+            updateNotes[1], exportLines[1], updateLines[1]
         ], tone: .section)
         agentViewerCard = viewers
         let first = card(L("③ 첫 연결", "③ First connection"), "checkmark.shield", [
@@ -727,7 +785,9 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         let fix = card(L("④ 바로 고치기", "④ Fix it now"), "wrench.and.screwdriver", [
             hint(L("쓰다가 불편하면 누르세요. AI 도우미가 원인을 찾아 고치고 받는 앱까지 새로 보내요.",
                    "Something bothering you? The AI assistant finds the cause, fixes it, and updates the viewer too.")),
-            row([primary(L("④ 안내 복사", "Copy step ④"), "wand.and.stars", #selector(copyFixGuide), style: .quiet)])
+            row([explained(primary(L("④ 안내 복사", "Copy step ④"), "wand.and.stars", #selector(copyFixGuide), style: .quiet),
+                           "쓰다가 불편한 점이 있을 때 누르세요. AI 도우미에 붙여넣으면, 무엇이 불편한지 묻고 알아서 고쳐 줘요.",
+                           "Click when something bothers you. Paste into an AI assistant and it asks what is wrong, then fixes it.")])
         ], tone: .section)
         return page([intro, setup, viewers, first, fix])
     }
@@ -748,13 +808,17 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             hint(L("⌘+Space·⌘+Tab도 보내는 맥으로 보내려면 손쉬운 사용과 입력 모니터링을 켜세요. 스위치가 이미 켜져 있으면 －로 지우고 ＋로 다시 추가하세요.",
                    "To send ⌘+Space and ⌘+Tab to the host Mac, turn on Accessibility and Input Monitoring. If a switch is already on, remove it with − and add it again with +.")),
             viewerPermission,
-            row([ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
-                                    target: self, action: #selector(enableReceiverInput))])
+            row([explained(ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
+                                              target: self, action: #selector(enableReceiverInput)),
+                           "창 바꾸기(⌘+Tab)나 찾기(⌘+Space) 같은 키를 눌렀을 때, 이 컴퓨터가 아니라 멀리 있는 맥이 알아듣게 해요. 처음 한 번만 화면에 나오는 대로 허용해 주세요.",
+                           "Makes keys such as switching windows (⌘+Tab) and searching (⌘+Space) work on the far-away Mac instead of this computer. The first time, allow what the screen asks for.")])
         ])
         let fix = card(L("④ 바로 고치기", "④ Fix it now"), "wrench.and.screwdriver", [
             hint(L("불편하면 원격 화면에서 보내는 맥의 파이널 퓨전을 열고 「④ 바로 고치기」의 「④ 안내 복사」를 누르세요. 이 기기 정보가 필요하면 아래 버튼을 누르세요.",
                    "If something bothers you, open Final Fusion on the host Mac through the remote screen and click “Copy step ④” under “④ Fix it now”. Click below if this device's info is needed.")),
-            row([primary(L("이 기기 정보 복사", "Copy device info"), "doc.on.doc", #selector(copyViewerFix), style: .quiet)])
+            row([explained(primary(L("이 기기 정보 복사", "Copy device info"), "doc.on.doc", #selector(copyViewerFix), style: .quiet),
+                           "이 컴퓨터의 상태를 글로 복사해요. 도와주는 사람이나 AI 도우미에게 붙여넣어 보여 주면 문제를 찾기 쉬워요.",
+                           "Copies a description of how this computer is doing. Paste it for a helper or an AI assistant so the problem is easier to find.")])
         ], tone: .section)
         return page([intro, connect, allow, keys, fix])
     }
@@ -881,6 +945,14 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private func row(_ views: [NSView]) -> NSStackView {
         let stack = NSStackView(views: views)
         stack.spacing = 8
+        return stack
+    }
+
+    /// Puts a tiny “?” after a setting; a click explains it in plain words.
+    private func explained(_ view: NSView, _ korean: String, _ english: String) -> NSStackView {
+        let stack = NSStackView(views: [view, HelpBubble(L(korean, english))])
+        stack.spacing = 5
+        stack.alignment = .centerY
         return stack
     }
 
@@ -1345,6 +1417,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             viewer.diagnosticsEnabled = diagnostics.state == .on
             viewer.matchInputSource = inputLanguage.state == .on
             viewer.playsAudio = hostSound.state == .on
+            viewer.sharesClipboard = sharedClipboard.state == .on
             viewer.onConnected = { [weak self] in
                 guard let self = self else { return }
                 self.viewingLine.show(.idle)
