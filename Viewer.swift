@@ -392,6 +392,9 @@ final class StudioViewer {
                 let remote = displays.map { display -> RemoteView in
                     let view = RemoteView(display: display, modifiers: modifiers)
                     view.kioskInput = true
+                    if display.clipboardScreenshots == true && !receiverMode.handlesSystemShortcuts {
+                        view.addScreenshotButton()
+                    }
                     view.screenMargin = display.nativePixels == true ? 0 : screenMargin
                     view.usesNativeCapsSwitch = nativeCaps && display.macInputMatching == true
                     bindInput(to: view)
@@ -506,6 +509,8 @@ final class StudioViewer {
         case let .received(files):
             clipboardPercent = -1
             text = L("파일 \(files)개를 받았어요. 이 맥에서 붙여넣으세요.", "Received \(files) file(s). Paste them on this Mac.")
+        case .screenshotReceived:
+            text = L("캡처를 두 맥에 복사했어요.", "Screenshot copied to both Macs.")
         case .skipped:
             clipboardPercent = -1
             text = L("폴더, 65개 이상, 합쳐서 200MB가 넘는 파일은 복사해서 보낼 수 없어요.",
@@ -776,6 +781,7 @@ final class RemoteView: NSView {
     private var selectingScreenshot = false
     private var screenshotAnchor: NSPoint?
     private let screenshotOutline = CAShapeLayer()
+    private var screenshotButton: NSButton?
     private var hidesLocalCursor: Bool { kioskInput && display.localCursor != true }
     /// The host's current cursor shape, shown instead of the local arrow over the remote screen.
     var remoteCursor: NSCursor? {
@@ -851,6 +857,11 @@ final class RemoteView: NSView {
         screenshotOutline.frame = bounds
         pointerFeedback.layout(in: bounds)
         CATransaction.commit()
+        if let button = screenshotButton {
+            let size = button.fittingSize
+            button.frame = NSRect(x: max(0, bounds.maxX - size.width - 14),
+                                  y: max(0, bounds.maxY - size.height - 14), width: size.width, height: size.height)
+        }
     }
 
     override func updateTrackingAreas() {
@@ -868,10 +879,13 @@ final class RemoteView: NSView {
         if selectingScreenshot { addCursorRect(bounds, cursor: .crosshair) }
         else if hidesLocalCursor { addCursorRect(bounds, cursor: Self.hiddenCursor) }
         else if let cursor = remoteCursor { addCursorRect(displayedRect, cursor: cursor) }
+        if let button = screenshotButton, !button.isHidden { addCursorRect(button.frame, cursor: .arrow) }
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if selectingScreenshot { NSCursor.crosshair.set() }
+        if let button = screenshotButton, !button.isHidden,
+           button.frame.contains(convert(event.locationInWindow, from: nil)) { NSCursor.arrow.set() }
+        else if selectingScreenshot { NSCursor.crosshair.set() }
         else if hidesLocalCursor { Self.hiddenCursor.set() }
         else if let cursor = remoteCursor, isPointerOverRemoteScreen { cursor.set() }
         else { super.cursorUpdate(with: event) }
@@ -1140,17 +1154,34 @@ final class RemoteView: NSView {
         CATransaction.commit()
     }
 
+    func addScreenshotButton() {
+        guard screenshotButton == nil else { return }
+        let button = NSButton(title: L("캡처 복사", "Copy screenshot"), target: self, action: #selector(showScreenshotButtonMenu))
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.toolTip = L("보내는 맥 화면을 캡처해 복사해요.", "Capture and copy the host Mac's screen.")
+        screenshotButton = button
+        addSubview(button)
+        needsLayout = true
+    }
+
+    @objc private func showScreenshotButtonMenu() {
+        guard let button = screenshotButton else { return }
+        showScreenshotChoices(at: NSPoint(x: button.frame.minX, y: button.frame.minY))
+    }
+
     @objc private func selectSenderScreenshot() {
         pointerFeedback.clear()
         endScreenshotSelection()
         resetTouchTracking()
         selectingScreenshot = true
+        screenshotButton?.isHidden = true
         updateTrackingAreas()
         window?.invalidateCursorRects(for: self)
         NSCursor.crosshair.set()
     }
 
-    private func showScreenshotChoices() {
+    private func showScreenshotChoices(at point: NSPoint? = nil) {
         guard window?.isVisible == true else { return }
         let menu = NSMenu()
         let full = menu.addItem(withTitle: L("보내는 맥 전체 화면 복사", "Copy the host Mac's entire screen"), action: #selector(copyEntireSenderScreen), keyEquivalent: "")
@@ -1158,12 +1189,13 @@ final class RemoteView: NSView {
         full.target = self
         area.target = self
         let rect = displayedRect
-        menu.popUp(positioning: nil, at: NSPoint(x: rect.midX - 100, y: rect.maxY - 18), in: self)
+        menu.popUp(positioning: nil, at: point ?? NSPoint(x: rect.midX - 100, y: rect.maxY - 18), in: self)
     }
 
     private func endScreenshotSelection() {
         guard selectingScreenshot else { return }
         selectingScreenshot = false
+        screenshotButton?.isHidden = false
         screenshotAnchor = nil
         screenshotOutline.path = nil
         window?.invalidateCursorRects(for: self)

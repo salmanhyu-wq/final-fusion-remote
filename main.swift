@@ -21,7 +21,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private var published: ReceiverProfile?
     private let receiver = ReceiverProfile.bundled()
     private let receiverOnly = Bundle.main.object(forInfoDictionaryKey: "StudioReceiverOnly") as? Bool == true
-    private var appName: String { receiverOnly ? ProductName.receiver : ProductName.sender }
+    private var appName: String { receiverOnly ? ProductName.macReceiver : ProductName.sender }
     private var pending: String?
     private var pendingCode: String?
     private let quality = NSPopUpButton()
@@ -106,7 +106,17 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private let prepareGuide = ActionButton(.primary)
     private let sendGuide = ActionButton()
     private let connectionSummary = NSTextField(wrappingLabelWithString: "")
-    private let viewerPermission = NSTextField(labelWithString: "")
+    private enum ReceiverPermission: Hashable {
+        case accessibility, inputMonitoring
+
+        var title: String {
+            switch self {
+            case .accessibility: return L("손쉬운 사용", "Accessibility")
+            case .inputMonitoring: return L("입력 모니터링", "Input Monitoring")
+            }
+        }
+    }
+    private var receiverPermissionControls: [ReceiverPermission: [(NSTextField, ActionButton)]] = [:]
     private var lastExport: [String: String]?
     private var previewing = false
     static let startRequest = Notification.Name("app.finalfusion.remote.start-sharing")
@@ -155,19 +165,66 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         receiverMode.onExit = { [weak self] in self?.leaveReceiver() }
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            if self.receiverOnly && ViewerLocation.needsMove && self.offerMoveToApplications() { return }
-            if self.receiverOnly && self.receiver != nil &&
-                UserDefaults.standard.bool(forKey: "ReceiverPreviouslyConnected") &&
-                UserDefaults.standard.object(forKey: "ReceiverResolution") != nil &&
-                !NSEvent.modifierFlags.contains(.shift) {
-                self.window.orderOut(nil)
-                self.receiverMode.enter()
-                self.beginViewing()
-            } else if !self.receiverOnly && LocalSetup.load() != nil {
+            if self.receiverOnly {
+                if ViewerLocation.needsMove && self.offerMoveToApplications() { return }
+                self.finishViewerLaunch(renameBy: .now() + 4)
+            } else if LocalSetup.load() != nil {
                 self.wantsHosting = true
                 self.startSending(requestPermissions: false)
             }
         }
+    }
+
+    private func finishViewerLaunch(renameBy deadline: DispatchTime) {
+        guard !receiverMode.isActive else { return }
+        if let source = ViewerLocation.legacyInstallation, let id = Bundle.main.bundleIdentifier {
+            let anotherViewerIsRunning = NSRunningApplication.runningApplications(withBundleIdentifier: id).contains {
+                $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated &&
+                    $0.bundleURL?.resolvingSymlinksInPath().path == source.path
+            }
+            if anotherViewerIsRunning, DispatchTime.now() < deadline {
+                // An old updater checks this launch at the old path before it quits.
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) { [weak self] in
+                    self?.finishViewerLaunch(renameBy: deadline)
+                }
+                return
+            }
+            if !anotherViewerIsRunning && reopenViewerUnderKoreanName(from: source) { return }
+        }
+        reconnectViewerOnLaunch()
+    }
+
+    private func reconnectViewerOnLaunch() {
+        guard receiver != nil, viewing == nil,
+              UserDefaults.standard.bool(forKey: "ReceiverPreviouslyConnected"),
+              UserDefaults.standard.object(forKey: "ReceiverResolution") != nil,
+              !NSEvent.modifierFlags.contains(.shift) else { return }
+        window.orderOut(nil)
+        receiverMode.enter()
+        beginViewing()
+    }
+
+    private func reopenViewerUnderKoreanName(from source: URL) -> Bool {
+        let destination = source.deletingLastPathComponent().appendingPathComponent(ProductName.receiverBundle)
+        do {
+            try ViewerLocation.renameInstallation(from: source, to: destination)
+        } catch {
+            return false
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.promptsUserIfNeeded = false
+        NSWorkspace.shared.openApplication(at: destination, configuration: configuration) { [weak self] app, error in
+            DispatchQueue.main.async {
+                if error == nil, let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier, !app.isTerminated {
+                    NSApp.terminate(nil)
+                } else {
+                    try? ViewerLocation.renameInstallation(from: destination, to: source)
+                    self?.reconnectViewerOnLaunch()
+                }
+            }
+        }
+        return true
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -208,22 +265,17 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         if window != nil { fitWindow() }
     }
 
-    @objc private func enableReceiverInput() {
+    @objc private func openReceiverAccessibilitySettings() {
         if !AXIsProcessTrusted() {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
-            viewerStatus.stringValue = L("손쉬운 사용에서 「\(appName)」 앱을 켠 뒤 이 버튼을 다시 누르세요.",
-                                         "Turn on “\(appName)” in Accessibility, then click this button again.")
-            openInputPrivacyPane("Privacy_Accessibility")
-        } else if !CGPreflightListenEventAccess() {
-            _ = CGRequestListenEventAccess()
-            viewerStatus.stringValue = L("입력 모니터링에서 「\(appName)」 앱을 켜고 앱을 다시 여세요.",
-                                         "Turn on “\(appName)” in Input Monitoring, then reopen the app.")
-            openInputPrivacyPane("Privacy_ListenEvent")
-        } else {
-            viewerStatus.stringValue = L("준비됐어요. 원격 화면에서 스크린샷 키 ⌘+Shift+3·4를 쓸 수 있어요.",
-                                         "All set. Screenshot keys ⌘+Shift+3 and 4 work on the remote screen.")
         }
+        openInputPrivacyPane("Privacy_Accessibility")
+    }
+
+    @objc private func openReceiverInputMonitoringSettings() {
+        if !CGPreflightListenEventAccess() { _ = CGRequestListenEventAccess() }
+        openInputPrivacyPane("Privacy_ListenEvent")
     }
 
     private func openInputPrivacyPane(_ pane: String) {
@@ -271,7 +323,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                                "Clicks and keys: \(sent) sent · \(accepted) received by the host"))
             }
             if report.receiver.systemShortcuts == false {
-                lines.append(L("받는 맥에서 ‘단축키 켜기’를 눌러 주세요.", "On the viewer Mac, click “Turn on shortcuts”."))
+                lines.append(L("받는 앱의 ‘단축키 권한’에서 손쉬운 사용을 허용해 주세요.",
+                               "In the viewer’s Shortcut permissions, allow Accessibility."))
             }
             if let copied = report.screenshotCopied {
                 lines.append(copied ? L("최근 스크린샷을 보내는 맥의 클립보드에 복사했어요.",
@@ -674,11 +727,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                            explained(login, "이 컴퓨터를 켜면 이 앱이 저절로 열려요. 매번 앱을 찾아서 누르지 않아도 돼요.",
                                      "This app opens by itself when the computer starts, so you don't have to find and open it each time."),
                            loginStatus], tone: .section))
+        cards.append(receiverShortcutPermissions(numbered: false))
         cards.append(row([
-            explained(ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
-                                         target: self, action: #selector(enableReceiverInput)),
-                      "창 바꾸기(⌘+Tab)나 찾기(⌘+Space) 같은 키를 눌렀을 때, 이 컴퓨터가 아니라 멀리 있는 맥이 알아듣게 해요. 처음 한 번만 화면에 나오는 대로 허용해 주세요.",
-                      "Makes keys such as switching windows (⌘+Tab) and searching (⌘+Space) work on the far-away Mac instead of this computer. The first time, allow what the screen asks for."),
             explained(ActionButton().set(L("도움말 복사", "Copy help"), symbol: "doc.on.doc",
                                          target: self, action: #selector(copyViewerFix)),
                       "이 컴퓨터의 상태를 글로 복사해요. 도와주는 사람이나 AI 도우미에게 붙여넣어 보여 주면 문제를 찾기 쉬워요.",
@@ -793,7 +843,6 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     }
 
     private func receiverAgentPage() -> NSView {
-        viewerPermission.font = .systemFont(ofSize: 14, weight: .medium)
         let intro = hint(L("처음이라면 아래 순서대로 하면 돼요. 막히면 ④로 AI 도우미에게 도움을 받으세요.",
                            "If this is your first time, follow the steps below. If you get stuck, use ④ to get help from an AI assistant."))
         let connect = card(L("① 연결", "① Connect"), "display", [
@@ -804,15 +853,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             hint(L("처음 연결하면 화면에 6자리 번호가 나와요. 보내는 맥의 「③ 첫 연결」 칸에 입력하고 「허용」을 누르세요.",
                    "The first time, a 6-digit code appears. Enter it under “③ First connection” on the host Mac and click “Allow”."))
         ])
-        let keys = card(L("③ 단축키 설정", "③ Shortcut keys"), "keyboard", [
-            hint(L("⌘+Space·⌘+Tab도 보내는 맥으로 보내려면 손쉬운 사용과 입력 모니터링을 켜세요. 스위치가 이미 켜져 있으면 －로 지우고 ＋로 다시 추가하세요.",
-                   "To send ⌘+Space and ⌘+Tab to the host Mac, turn on Accessibility and Input Monitoring. If a switch is already on, remove it with − and add it again with +.")),
-            viewerPermission,
-            row([explained(ActionButton().set(L("단축키 켜기", "Turn on shortcuts"), symbol: "keyboard",
-                                              target: self, action: #selector(enableReceiverInput)),
-                           "창 바꾸기(⌘+Tab)나 찾기(⌘+Space) 같은 키를 눌렀을 때, 이 컴퓨터가 아니라 멀리 있는 맥이 알아듣게 해요. 처음 한 번만 화면에 나오는 대로 허용해 주세요.",
-                           "Makes keys such as switching windows (⌘+Tab) and searching (⌘+Space) work on the far-away Mac instead of this computer. The first time, allow what the screen asks for.")])
-        ])
+        let keys = receiverShortcutPermissions(numbered: true)
         let fix = card(L("④ 바로 고치기", "④ Fix it now"), "wrench.and.screwdriver", [
             hint(L("불편하면 원격 화면에서 보내는 맥의 파이널 퓨전을 열고 「④ 바로 고치기」의 「④ 안내 복사」를 누르세요. 이 기기 정보가 필요하면 아래 버튼을 누르세요.",
                    "If something bothers you, open Final Fusion on the host Mac through the remote screen and click “Copy step ④” under “④ Fix it now”. Click below if this device's info is needed.")),
@@ -843,14 +884,65 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         fitWindow()
     }
 
+    private func receiverShortcutPermissions(numbered: Bool) -> NSView {
+        func controls(_ permission: ReceiverPermission, buttonTitle: String, action: Selector) -> NSView {
+            let label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: 15, weight: .semibold)
+            let open = ActionButton().set(buttonTitle, symbol: "gearshape", target: self, action: action)
+            receiverPermissionControls[permission, default: []].append((label, open))
+            let group = NSStackView(views: [label, open])
+            group.orientation = .vertical
+            group.alignment = .leading
+            group.spacing = 7
+            return group
+        }
+        let access = controls(.accessibility,
+                              buttonTitle: L("손쉬운 사용 설정 열기", "Open Accessibility settings"),
+                              action: #selector(openReceiverAccessibilitySettings))
+        let monitoring = controls(.inputMonitoring,
+                                  buttonTitle: L("입력 모니터링 설정 열기", "Open Input Monitoring settings"),
+                                  action: #selector(openReceiverInputMonitoringSettings))
+        return card(numbered ? L("③ 단축키 권한", "③ Shortcut permissions")
+                             : L("단축키 권한", "Shortcut permissions"), "keyboard", [
+            hint(L("원격 화면에서 앱 전환(⌘Tab)과 캡처 단축키를 쓰려면 손쉬운 사용 설정에서 ‘\(appName)’를 켜 주세요.",
+                   "To switch apps with ⌘Tab and take screenshots remotely, allow “\(appName)” in Accessibility.")),
+            access,
+            monitoring,
+            hint(L("권한을 바꿨다면 받는 앱을 다시 열고 연결하세요.",
+                   "After changing a permission, reopen the viewer and connect."))
+        ])
+    }
+
     private func refreshViewerState() {
         guard receiverOnly else { return }
-        let access = !previewing && AXIsProcessTrusted(), monitoring = !previewing && CGPreflightListenEventAccess()
-        let text = "● " + L("손쉬운 사용", "Accessibility") + (access ? L(" · 허용됨", " · allowed") : L(" · 허용 필요", " · needed"))
-            + "     ● " + L("입력 모니터링", "Input Monitoring") + (monitoring ? L(" · 허용됨", " · allowed") : L(" · 허용 필요", " · needed"))
-        if viewerPermission.stringValue != text {
-            viewerPermission.stringValue = text
-            viewerPermission.textColor = access && monitoring ? .systemGreen : .systemOrange
+        let accessibility: Bool
+        let listening: Bool
+        if previewing {
+            let sample = ProcessInfo.processInfo.environment["FINAL_FUSION_PREVIEW_PERMISSIONS"]
+            accessibility = sample == "accessibility" || sample == "both"
+            listening = accessibility || sample == "monitoring"
+        } else {
+            accessibility = AXIsProcessTrusted()
+            listening = CGPreflightListenEventAccess()
+        }
+        for (permission, controls) in receiverPermissionControls {
+            let granted: Bool
+            let status: String
+            // macOS reports whether the app can listen, including access from Accessibility.
+            if permission == .inputMonitoring && accessibility && listening {
+                granted = true
+                status = "✓ " + permission.title + L(" · 입력 감지 가능", " · Listening available")
+            } else {
+                granted = permission == .accessibility ? accessibility : listening
+                status = granted
+                    ? "✓ " + permission.title + L(" · 허용됨", " · Allowed")
+                    : permission.title + L(" · 허용 필요", " · Needs permission")
+            }
+            for (label, button) in controls where label.stringValue != status {
+                label.stringValue = status
+                label.textColor = granted ? Palette.permissionGranted : .labelColor
+                button.setStyle(granted ? .success : .secondary)
+            }
         }
     }
 
@@ -875,8 +967,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             }
             return true
         } catch {
-            viewerStatus.stringValue = L("옮기지 못했어요. Finder에서 「Studio Receiver」를 응용 프로그램 폴더로 직접 끌어다 놓아 주세요.",
-                                         "Couldn't move it. Drag “Studio Receiver” into the Applications folder in Finder.")
+            viewerStatus.stringValue = L("응용 프로그램 폴더에서 「\(appName)」를 찾아 열어 주세요. 앱이 없다면 Finder에서 옮겨 주세요.",
+                                         "Open “\(appName)” in Applications. If it's missing, move the app there in Finder.")
             return false
         }
     }
@@ -1722,12 +1814,14 @@ if arguments.count == 2, arguments[1] == "--verify-receiver-startup", receiverOn
         helper.waitUntilExit()
         exit(helper.terminationStatus)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
-} else if (3...4).contains(arguments.count), arguments[1] == "--test-export" {
+} else if (3...4).contains(arguments.count), ["--test-export", "--test-update-export"].contains(arguments[1]) {
     do {
         let profile = ReceiverProfile(relay: "https://relay.example.com", room: String(repeating: "a3", count: 32),
                                       pin: String(repeating: "d1", count: 32), invitation: String(repeating: "e2", count: 16), macPin: nil)
         let folder = URL(fileURLWithPath: arguments[2], isDirectory: true)
-        print(try ReceiverExport.make(profile, in: folder, target: arguments.count == 4 ? ViewerTarget(rawValue: arguments[3]) : nil).path)
+        let forUpdate = arguments[1] == "--test-update-export"
+        let target = forUpdate ? .appleSilicon : (arguments.count == 4 ? ViewerTarget(rawValue: arguments[3]) : nil)
+        print(try ReceiverExport.make(profile, in: folder, target: target, forUpdate: forUpdate).path)
     } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
 } else if arguments.count == 3, arguments[1] == "--preview-ui" {
     runUIPreview(output: URL(fileURLWithPath: arguments[2], isDirectory: true))

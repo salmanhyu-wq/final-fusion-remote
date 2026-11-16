@@ -13,6 +13,11 @@ enum Palette {
             ? NSColor(srgbRed: 0.38, green: 0.24, blue: 0.76, alpha: 1)
             : NSColor(srgbRed: 0.34, green: 0.22, blue: 0.73, alpha: 1)
     }
+    static let permissionGranted = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.49, green: 0.87, blue: 0.60, alpha: 1)
+            : NSColor(srgbRed: 0.08, green: 0.40, blue: 0.21, alpha: 1)
+    }
     // Colours taken from the round My Music Gacha patch.
     static let gachaDeep = NSColor(srgbRed: 0.09, green: 0.06, blue: 0.19, alpha: 1)
     static let gachaViolet = NSColor(srgbRed: 0.29, green: 0.18, blue: 0.56, alpha: 1)
@@ -28,7 +33,7 @@ enum GachaArt {
 
 /// A rounded, filled button with an optional SF Symbol.
 final class ActionButton: NSButton {
-    enum Style { case primary, secondary, quiet, danger }
+    enum Style { case primary, secondary, quiet, danger, success }
 
     private var style: Style
     private var label = ""
@@ -118,6 +123,7 @@ final class ActionButton: NSButton {
         case .secondary: text = .labelColor; fill = NSColor.labelColor.withAlphaComponent(0.08)
         case .quiet: text = .labelColor; fill = NSColor.labelColor.withAlphaComponent(0.025)
         case .danger: text = .systemRed; fill = NSColor.systemRed.withAlphaComponent(0.12)
+        case .success: text = Palette.permissionGranted; fill = Palette.permissionGranted.withAlphaComponent(0.12)
         }
         var background: CGColor?
         effectiveAppearance.performAsCurrentDrawingAppearance {

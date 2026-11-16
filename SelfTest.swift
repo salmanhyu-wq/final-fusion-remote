@@ -356,7 +356,7 @@ func runSelfTests() -> Never {
         let guide = AgentGuide.viewer(target)
         check(guide.contains("--export-receivers") && guide.contains(target.rawValue) && guide.contains(target.file)
               && guide.contains(target.firstRun), "viewer guide for \(target.rawValue)")
-        check(target.firstRun.contains(target.isMac ? "Studio Receiver" : ".exe"), "first-run steps for \(target.rawValue)")
+        check(target.firstRun.contains(target.isMac ? ProductName.macReceiver : ".exe"), "first-run steps for \(target.rawValue)")
     }
     let hostReport = SupportReport.host()
     check(hostReport["version"] as? String == AgentGuide.version && hostReport["relayConfigured"] is Bool,
@@ -469,6 +469,17 @@ private func checkClipboardSharing() {
     wait { right.data(forType: .png) == png }
     check(right.data(forType: .png) == png && right.data(forType: .tiff) != nil && right.string(forType: .string) == nil,
           "a copied picture arrives as a picture")
+
+    // Use the actual sender capture writer so only a shared screenshot reports completion.
+    check(!farSeen.contains(.screenshotReceived), "an ordinary picture does not report a screenshot")
+    picture.setColor(.blue, atX: 3, y: 3)
+    let capture = ScreenshotClipboard.representations(picture.cgImage!)!
+    check(ScreenshotClipboard.write(capture, to: left), "captured screen is copied on the sender")
+    wait { farSeen.contains(.screenshotReceived) }
+    check(farSeen.filter { $0 == .screenshotReceived }.count == 1 &&
+          left.data(forType: .png) == capture.png && right.data(forType: .png) == capture.png &&
+          right.data(forType: .tiff) != nil,
+          "the receiver reports the screenshot only after both clipboards can paste it")
 
     var big = Data(count: 70_001)
     for index in big.indices { big[index] = UInt8(truncatingIfNeeded: index &* 31 &+ index >> 8) }

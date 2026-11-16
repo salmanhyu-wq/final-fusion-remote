@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreServices
 
 /// The device that will run the viewer app. It decides which file is sent and the first-run steps.
 enum ViewerTarget: String, CaseIterable {
@@ -26,17 +27,17 @@ enum ViewerTarget: String, CaseIterable {
                 : L("macOS 11 이상이면 돼요.", "Requires macOS 11 or later.")
             return L("""
             1. \(requirement)
-            2. 링크에서 「\(file)」 파일을 내려받아 여세요. 안의 「Studio Receiver」를 응용 프로그램 폴더로 끌어다 놓으세요.
+            2. 링크에서 「\(file)」 파일을 내려받아 여세요. 안의 「\(ProductName.macReceiver)」를 응용 프로그램 폴더로 끌어다 놓으세요.
             3. 응용 프로그램 폴더에서 앱을 여세요. "확인할 수 없는 개발자" 창이 뜨면 시스템 설정 → 개인정보 보호 및 보안 → 아래쪽 「그래도 열기」를 누르세요. (macOS 14 이하는 앱을 Control-클릭 → 「열기」도 돼요.)
             4. 「연결하기」를 누르면 6자리 번호가 나와요. 보내는 맥의 파이널 퓨전 「③ 첫 연결」 칸에 이 번호를 입력하고 「허용」을 누르세요.
-            5. 「단축키 켜기」를 눌러 손쉬운 사용과 입력 모니터링을 켜면 ⌘+Space·⌘+Tab도 보내는 맥으로 가요.
+            5. 원격 단축키를 쓰려면 「손쉬운 사용 설정 열기」를 누르고 「\(ProductName.macReceiver)」를 허용하세요. 권한을 바꿨다면 받는 앱을 다시 열고 연결하세요.
             6. 원격 화면에서 설정으로 돌아오기: \(ReceiverMode.exitKeys)
             """, """
             1. \(requirement)
-            2. Download “\(file)” from the link and open it. Drag “Studio Receiver” into the Applications folder.
+            2. Download “\(file)” from the link and open it. Drag “\(ProductName.macReceiver)” into the Applications folder.
             3. Open it from Applications. If macOS says it can't verify the developer, go to System Settings → Privacy & Security and click “Open Anyway” near the bottom. (On macOS 14 or earlier you can also Control-click the app → Open.)
             4. Click “Connect”. A 6-digit code appears. Enter it under “③ First connection” in Final Fusion on the host Mac and click “Allow”.
-            5. Click “Turn on shortcuts” and turn on Accessibility and Input Monitoring so ⌘+Space and ⌘+Tab reach the host Mac.
+            5. To use remote shortcuts, click “Open Accessibility settings” and allow “\(ProductName.macReceiver)”. After changing a permission, reopen the viewer and connect.
             6. To return to settings from the remote screen: \(ReceiverMode.exitKeys)
             """)
         }
@@ -247,7 +248,7 @@ enum SupportReport {
 
     static func viewer(status: String) -> [String: Any] {
         [
-            "app": "Final Fusion Viewer", "version": AgentGuide.version,
+            "app": ProductName.macReceiver, "version": AgentGuide.version,
             "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
             "appPath": Bundle.main.bundleURL.path, "language": AppLanguage.code,
             "runsFromApplications": ViewerLocation.isInstalled,
@@ -322,15 +323,33 @@ enum ViewerLocation {
         return path.hasPrefix("/Volumes/") || path.contains("/AppTranslocation/") || path.contains("/Downloads/")
     }
 
-    /// Copies the running viewer into /Applications (keeping its file name) and returns the new location.
+    static var legacyInstallation: URL? {
+        let source = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let destination = source.deletingLastPathComponent().appendingPathComponent(ProductName.receiverBundle)
+        guard isInstalled, source.lastPathComponent == ProductName.legacyReceiverBundle,
+              !FileManager.default.fileExists(atPath: destination.path) else { return nil }
+        return source
+    }
+
+    /// Renames the bundle in place, keeping its identity for Dock and permission records.
+    static func renameInstallation(from source: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        try fm.moveItem(at: source, to: destination)
+        do {
+            try ReceiverLogin.relocateLegacyRegistration(from: source, to: destination)
+        } catch {
+            try fm.moveItem(at: destination, to: source)
+            throw error
+        }
+        _ = LSRegisterURL(destination as CFURL, true)
+    }
+
+    /// Copies the running viewer into /Applications under its displayed name.
     static func moveToApplications() throws -> URL {
         let fm = FileManager.default
         let source = Bundle.main.bundleURL
-        let destination = URL(fileURLWithPath: "/Applications", isDirectory: true).appendingPathComponent(source.lastPathComponent)
-        if fm.fileExists(atPath: destination.path) {
-            let backup = fm.temporaryDirectory.appendingPathComponent("Studio Receiver backup " + UUID().uuidString.prefix(8) + ".app")
-            try fm.moveItem(at: destination, to: backup)
-        }
+        let destination = URL(fileURLWithPath: "/Applications", isDirectory: true).appendingPathComponent(ProductName.receiverBundle)
+        // An installation already using this name may hold a different pairing profile.
         try fm.copyItem(at: source, to: destination)
         return destination
     }

@@ -239,10 +239,12 @@ final class HostLink {
 
 enum ProductName {
     static let sender = L("파이널 퓨전", "Final Fusion")
-    static let receiver = L("파이널 퓨전 받기", "Final Fusion Viewer")
-    static let receiverImage = receiver + ".dmg"
-    // Existing Mac receivers open this exact path inside the update disk image.
-    static let receiverBundle = "Studio Receiver.app"
+    static let macReceiver = "파이널 퓨전 받기"
+    static let receiver = L(macReceiver, "Final Fusion Viewer")
+    static let receiverImage = macReceiver + ".dmg"
+    static let receiverBundle = macReceiver + ".app"
+    // Existing Mac receivers look for this exact path inside DIY updates.
+    static let legacyReceiverBundle = "Studio Receiver.app"
 }
 
 /// Writes ko.lproj and en.lproj InfoPlist.strings so Finder, the Dock and the menu bar
@@ -263,14 +265,16 @@ enum LocalizedNames {
 enum ReceiverExport {
     /// Builds the Mac disk image and the Windows program. With a target only that device's file is kept
     /// and the read-me lists that device's first-run steps.
-    static func make(_ profile: ReceiverProfile, in destination: URL, target: ViewerTarget? = nil) throws -> URL {
+    static func make(_ profile: ReceiverProfile, in destination: URL, target: ViewerTarget? = nil,
+                     forUpdate: Bool = false) throws -> URL {
         let fm = FileManager.default
         let temp = fm.temporaryDirectory.appendingPathComponent("StudioReceiver-" + UUID().uuidString, isDirectory: true)
         try fm.createDirectory(at: temp, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: temp) }
         let output = temp.appendingPathComponent(ProductName.receiver, isDirectory: true)
         let mac = temp.appendingPathComponent("Mac", isDirectory: true)
-        let app = mac.appendingPathComponent(ProductName.receiverBundle, isDirectory: true)
+        let bundleName = forUpdate ? ProductName.legacyReceiverBundle : ProductName.receiverBundle
+        let app = mac.appendingPathComponent(bundleName, isDirectory: true)
         let contents = app.appendingPathComponent("Contents", isDirectory: true)
         let resources = contents.appendingPathComponent("Resources", isDirectory: true)
         let executable = contents.appendingPathComponent("MacOS", isDirectory: true)
@@ -292,21 +296,29 @@ enum ReceiverExport {
                 try fm.copyItem(at: url, to: resources.appendingPathComponent(extra))
             }
         }
-        try LocalizedNames.write(in: resources, korean: "파이널 퓨전 받기", english: "Final Fusion Viewer")
+        try LocalizedNames.write(in: resources, korean: ProductName.macReceiver, english: ProductName.macReceiver)
         let config = try JSONEncoder().encode(profile)
         try config.write(to: resources.appendingPathComponent("Receiver.json"))
         var info = original
         info["CFBundleIdentifier"] = "app.finalfusion.remote.receiver"
-        info["CFBundleName"] = ProductName.receiver
-        info["CFBundleDisplayName"] = ProductName.receiver
+        info["CFBundleName"] = ProductName.macReceiver
+        info["CFBundleDisplayName"] = ProductName.macReceiver
         info["StudioReceiverOnly"] = true
         info["StudioReceiverStartupCheck"] = true
         let plist = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
         try plist.write(to: contents.appendingPathComponent("Info.plist"))
         // Sign the viewer with the host's fixed certificate so the viewer keeps its permissions across updates.
         let identity = original["FinalFusionSigningIdentity"] as? String ?? ""
-        let signed = !identity.isEmpty && (try? run("/usr/bin/codesign", ["--force", "--sign", identity, app.path])) != nil
-        if !signed { try run("/usr/bin/codesign", ["--force", "--sign", "-", app.path]) }
+        if identity.isEmpty {
+            try run("/usr/bin/codesign", ["--force", "--sign", "-", app.path])
+        } else {
+            do {
+                try run("/usr/bin/codesign", ["--force", "--sign", identity, app.path])
+            } catch {
+                throw StudioError.message(L("받는 앱에 기존 인증서로 서명하지 못했어요. 맥의 서명 키를 확인해 주세요.",
+                                            "Couldn't sign the viewer with the configured certificate. Check the Mac's signing key."))
+            }
+        }
         try run("/usr/bin/codesign", ["--verify", "--strict", app.path])
 
         let winApp = output.appendingPathComponent(ProductName.receiver + ".exe")
@@ -322,13 +334,13 @@ enum ReceiverExport {
         } catch { try? file.close(); throw error }
 
         let instructions = target?.firstRun ?? L("""
-        맥은 「\(ProductName.receiverImage)」 파일을 열어 안의 「Studio Receiver」를 응용 프로그램 폴더로 옮긴 뒤 여세요.
+        맥은 「\(ProductName.receiverImage)」 파일을 열어 안의 「\(ProductName.macReceiver)」를 응용 프로그램 폴더로 옮긴 뒤 여세요.
         Windows는 「\(ProductName.receiver).exe」 파일을 여세요. Windows 10·11 64비트와 Microsoft Edge 또는 Google Chrome이 필요해요.
         「연결하기」를 누른 뒤 처음에만 받는 앱에 나온 6자리 번호를 보내는 맥에 입력하고 「허용」을 누르세요.
         맥에서 원격 화면을 나가 설정으로 돌아오려면 \(ReceiverMode.exitKeys) 키를 누르세요.
         처음 열 때 보안 확인 창이 뜨면 안내에 따라 열기를 눌러 주세요.
         """, """
-        Mac: open “\(ProductName.receiverImage)”, drag “Studio Receiver” into the Applications folder, and open it.
+        Mac: open “\(ProductName.receiverImage)”, drag “\(ProductName.macReceiver)” into the Applications folder, and open it.
         Windows: open “\(ProductName.receiver).exe”. Requires 64-bit Windows 10 or 11 with Microsoft Edge or Google Chrome.
         Click “Connect”, then enter the 6-digit code shown in the viewer on the host Mac and click “Allow” (first time only).
         On a Mac, press \(ReceiverMode.exitKeys) to return to settings from the remote screen.
@@ -340,7 +352,7 @@ enum ReceiverExport {
         try fm.createSymbolicLink(at: mac.appendingPathComponent("Applications"),
                                   withDestinationURL: URL(fileURLWithPath: "/Applications", isDirectory: true))
         try run("/usr/bin/hdiutil", ["create", "-quiet", "-fs", "HFS+", "-format", "UDRO",
-                                    "-srcfolder", mac.path, "-volname", ProductName.receiver,
+                                    "-srcfolder", mac.path, "-volname", ProductName.macReceiver,
                                     output.appendingPathComponent(ProductName.receiverImage).path])
         if let target = target {
             try fm.removeItem(at: output.appendingPathComponent(target.isMac ? ProductName.receiver + ".exe" : ProductName.receiverImage))

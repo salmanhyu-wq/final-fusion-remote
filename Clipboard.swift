@@ -10,6 +10,11 @@ struct ParcelHeader: Codable {
         var name: String?
     }
     let parts: [Part]
+    var screenshot: Bool? = nil
+
+    var isScreenshot: Bool {
+        screenshot == true && parts.count == 1 && parts[0].type == "png" && parts[0].size > 0
+    }
 }
 
 /// The first byte of every parcel message. The message's screen field is the parcel's number.
@@ -28,6 +33,7 @@ final class ClipboardShare {
     static let maxImage = 32 * 1024 * 1024
     static let maxFiles = 200 * 1024 * 1024
     static let maxFileCount = 64
+    static let screenshotMarker = NSPasteboard.PasteboardType("app.finalfusion.remote-screenshot")
     private static let maxQueuedBytes = 4 * 1024 * 1024
     private static let fileChunksPerTick = 2
     private static let textTypes: [(name: String, type: NSPasteboard.PasteboardType)] =
@@ -41,6 +47,7 @@ final class ClipboardShare {
         case sent(files: Int)
         case receiving(files: Int, progress: Double)
         case received(files: Int)
+        case screenshotReceived
         case skipped
         case interrupted
     }
@@ -58,7 +65,7 @@ final class ClipboardShare {
 
     private enum Copy {
         case ignored, unsupported
-        case parcel([ParcelHeader.Part], [Source])
+        case parcel(ParcelHeader, [Source])
     }
 
     private final class Outgoing {
@@ -88,6 +95,7 @@ final class ClipboardShare {
         let id: UInt32
         let parts: [ParcelHeader.Part]
         let names: [String?]
+        let isScreenshot: Bool
         let files: Int
         let total: Int
         var index = 0
@@ -99,10 +107,11 @@ final class ClipboardShare {
         var handle: FileHandle?
         var urls: [URL] = []
 
-        init(id: UInt32, parts: [ParcelHeader.Part], names: [String?]) {
+        init(id: UInt32, header: ParcelHeader, names: [String?]) {
             self.id = id
-            self.parts = parts
+            parts = header.parts
             self.names = names
+            isScreenshot = header.isScreenshot
             files = names.compactMap { $0 }.count
             total = parts.reduce(0) { $0 + $1.size }
             buffers = Array(repeating: Data(), count: parts.count)
@@ -219,10 +228,9 @@ final class ClipboardShare {
             _ = send(nextID, Data([ParcelPhase.skipped.rawValue]))
             nextID &+= 1
             report(.skipped, run: run)
-        case let .parcel(parts, sources):
-            guard let header = try? JSONEncoder().encode(ParcelHeader(parts: parts)),
-                  header.count <= Self.chunkSize else { return }
-            let files = parts.filter { $0.type == "file" }.count
+        case let .parcel(copy, sources):
+            guard let header = try? JSONEncoder().encode(copy), header.count <= Self.chunkSize else { return }
+            let files = copy.parts.filter { $0.type == "file" }.count
             outgoing = Outgoing(id: nextID, header: header, sources: sources, files: files)
             nextID &+= 1
             if files > 0 { report(.sending(files: files, progress: 0), run: run) }
@@ -251,7 +259,7 @@ final class ClipboardShare {
                 parts.append(.init(type: "file", size: size, name: url.lastPathComponent))
                 sources.append(.file(url, size))
             }
-            return .parcel(parts, sources)
+            return .parcel(ParcelHeader(parts: parts), sources)
         }
         var parts: [ParcelHeader.Part] = []
         var sources: [Source] = []
@@ -268,7 +276,9 @@ final class ClipboardShare {
             parts.append(.init(type: "png", size: image.count))
             sources.append(.data(image))
         }
-        return parts.isEmpty ? .ignored : .parcel(parts, sources)
+        guard !parts.isEmpty else { return .ignored }
+        let screenshot = types.contains(Self.screenshotMarker) && parts.map(\.type) == ["png"]
+        return .parcel(ParcelHeader(parts: parts, screenshot: screenshot ? true : nil), sources)
     }
 
     static func fileSize(_ url: URL) -> Int? {
@@ -393,7 +403,7 @@ final class ClipboardShare {
             discardIncoming()
             guard let header = try? JSONDecoder().decode(ParcelHeader.self, from: Data(body)),
                   let names = Self.acceptedNames(header.parts) else { return }
-            let parcel = Incoming(id: id, parts: header.parts, names: names)
+            let parcel = Incoming(id: id, header: header, names: names)
             if parcel.files > 0 {
                 let directory = folder.appendingPathComponent(UUID().uuidString, isDirectory: true)
                 guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil else { return }
@@ -524,8 +534,10 @@ final class ClipboardShare {
                 case "rtf": item.setData(data, forType: .rtf)
                 case "html": item.setData(data, forType: .html)
                 case "png":
+                    let bitmap = NSBitmapImageRep(data: data)
+                    if parcel.isScreenshot && bitmap == nil { return }
                     item.setData(data, forType: .png)
-                    if let tiff = NSBitmapImageRep(data: data)?.tiffRepresentation(using: .lzw, factor: 1) {
+                    if let tiff = bitmap?.tiffRepresentation(using: .lzw, factor: 1) {
                         item.setData(tiff, forType: .tiff)
                     }
                 default: break
@@ -536,6 +548,7 @@ final class ClipboardShare {
             guard pasteboard.writeObjects([item]) else { return }
             // What just arrived must not travel back.
             seenChange = pasteboard.changeCount
+            if parcel.isScreenshot { report(.screenshotReceived, run: run) }
         }
     }
 

@@ -1336,6 +1336,7 @@ struct ScreenshotClipboard {
         let item = NSPasteboardItem()
         guard item.setData(image.png, forType: .png) else { return false }
         if let tiff = image.tiff { item.setData(tiff, forType: .tiff) }
+        item.setString("1", forType: ClipboardShare.screenshotMarker)
         pasteboard.clearContents()
         return pasteboard.writeObjects([item])
     }

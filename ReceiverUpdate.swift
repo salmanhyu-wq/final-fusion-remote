@@ -70,7 +70,7 @@ struct ReceiverUpdateOffer: Codable {
         let temp = fm.temporaryDirectory.appendingPathComponent("Studio-update-" + UUID().uuidString, isDirectory: true)
         try fm.createDirectory(at: temp, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: temp) }
-        let exported = try ReceiverExport.make(profile, in: temp)
+        let exported = try ReceiverExport.make(profile, in: temp, target: .appleSilicon, forUpdate: true)
         let image = exported.appendingPathComponent(ProductName.receiverImage)
         guard let size = try image.resourceValues(forKeys: [.fileSizeKey]).fileSize, (1...maxSize).contains(size) else {
             throw StudioError.message(L("업데이트 파일이 너무 커서 보내지 못했어요.", "The update file is too large to send."))
@@ -138,7 +138,9 @@ struct ReceiverUpdateInstall {
         try run("/usr/bin/hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mount.path, image.path])
         defer { try? run("/usr/bin/hdiutil", ["detach", mount.path]) }
 
-        let candidate = mount.appendingPathComponent(ProductName.receiverBundle, isDirectory: true)
+        let namedCandidate = mount.appendingPathComponent(ProductName.receiverBundle, isDirectory: true)
+        let candidate = fm.fileExists(atPath: namedCandidate.path)
+            ? namedCandidate : mount.appendingPathComponent(ProductName.legacyReceiverBundle, isDirectory: true)
         guard let bundle = Bundle(url: candidate), bundle.bundleIdentifier == Bundle.main.bundleIdentifier,
               bundle.object(forInfoDictionaryKey: "StudioReceiverOnly") as? Bool == true,
               bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == offer.version,

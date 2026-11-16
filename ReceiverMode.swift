@@ -36,7 +36,7 @@ final class ReceiverMode {
         NSApp.presentationOptions = [.hideDock, .hideMenuBar, .disableAppleMenu,
                                       .disableProcessSwitching, .disableForceQuit, .disableHideApplication]
         activity = ProcessInfo.processInfo.beginActivity(
-            options: [.userInitiated, .idleDisplaySleepDisabled], reason: "Studio Receiver fullscreen")
+            options: [.userInitiated, .idleDisplaySleepDisabled], reason: ProductName.macReceiver)
         let center = NotificationCenter.default
         notifications = [
             center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
@@ -381,12 +381,25 @@ enum ReceiverLogin {
         return FileManager.default.fileExists(atPath: legacyFile.path)
     }
 
+    static func relocateLegacyRegistration(from source: URL, to destination: URL) throws {
+        if #available(macOS 13, *) { return }
+        guard FileManager.default.fileExists(atPath: legacyFile.path) else { return }
+        let data = try Data(contentsOf: legacyFile)
+        guard var plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let arguments = plist["ProgramArguments"] as? [String], arguments.count == 3,
+              arguments[0] == "/usr/bin/open", arguments[1] == "-a",
+              URL(fileURLWithPath: arguments[2]).resolvingSymlinksInPath().path == source.path else { return }
+        plist["ProgramArguments"] = ["/usr/bin/open", "-a", destination.path]
+        let updated = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try updated.write(to: legacyFile, options: .atomic)
+    }
+
     static func setRegistered(_ enabled: Bool, sender: Bool) throws -> String {
         if #available(macOS 13, *) {
             if enabled {
                 try SMAppService.mainApp.register()
                 if SMAppService.mainApp.status == .requiresApproval {
-                    let name = sender ? ProductName.sender : ProductName.receiver
+                    let name = sender ? ProductName.sender : ProductName.macReceiver
                     return L("시스템 설정 → 일반 → 로그인 항목에서 「\(name)」 앱을 켜 주세요.",
                              "Turn on “\(name)” in System Settings → General → Login Items.")
                 }
