@@ -381,6 +381,11 @@ enum ReceiverLogin {
         return FileManager.default.fileExists(atPath: legacyFile.path)
     }
 
+    static var canOpenAtLogin: Bool {
+        if #available(macOS 13, *) { return SMAppService.mainApp.status == .enabled }
+        return isRegistered
+    }
+
     static func relocateLegacyRegistration(from source: URL, to destination: URL) throws {
         if #available(macOS 13, *) { return }
         guard FileManager.default.fileExists(atPath: legacyFile.path) else { return }

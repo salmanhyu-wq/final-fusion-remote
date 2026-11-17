@@ -17,6 +17,16 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private let pairNumber = NSTextField(string: "")
     private let login = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let loginStatus = NSTextField(wrappingLabelWithString: "")
+    private let loginWindowSwitch = NSSwitch()
+    private let loginWindowStatus = NSTextField(wrappingLabelWithString: "")
+    private let fileVaultNote = NSTextField(wrappingLabelWithString: "")
+    private let reinstallLoginWindow = ActionButton()
+    private let senderLoginControls = NSStackView()
+    private let manualLoginSlot = NSStackView()
+    private let agentLoginSlot = NSStackView()
+    private var loginWindowState: LoginWindowSetup.State?
+    private var checkingLoginWindow = false
+    private var changingLoginWindow = false
     private var awake: NSObjectProtocol?
     private var published: ReceiverProfile?
     private let receiver = ReceiverProfile.bundled()
@@ -157,6 +167,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                 self?.writeHostStatus()
             }
             refreshSenderState()
+            refreshLoginWindow()
         } else {
             statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshViewerState() }
             refreshViewerState()
@@ -250,6 +261,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func changeLoginItem() {
+        defer { if !receiverOnly { renderLoginWindow() } }
         do {
             setLoginStatus(try ReceiverLogin.setRegistered(login.state == .on, sender: !receiverOnly))
         } catch {
@@ -263,6 +275,107 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         loginStatus.stringValue = text
         loginStatus.isHidden = text.isEmpty
         if window != nil { fitWindow() }
+    }
+
+    private func refreshLoginWindow() {
+        guard !receiverOnly, !previewing, window != nil,
+              !checkingLoginWindow, !changingLoginWindow else { return }
+        if #unavailable(macOS 14) { return }
+        checkingLoginWindow = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let state = LoginWindowSetup.state
+            let fileVault = LoginWindowSetup.fileVaultEnabled
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.checkingLoginWindow = false
+                self.loginWindowState = state
+                self.fileVaultNote.isHidden = !fileVault
+                self.renderLoginWindow()
+            }
+        }
+    }
+
+    private func renderLoginWindow() {
+        loginWindowSwitch.state = loginWindowState.map { $0 == .off ? .off : .on } ?? .off
+        loginWindowSwitch.isEnabled = loginWindowState != nil && !changingLoginWindow
+        reinstallLoginWindow.isHidden = loginWindowState != .reinstall
+        reinstallLoginWindow.isEnabled = !changingLoginWindow
+        let message: String
+        if changingLoginWindow {
+            message = L("관리자 승인과 설정 변경이 끝날 때까지 기다려 주세요.",
+                        "Wait for administrator approval and setup to finish.")
+        } else {
+            switch loginWindowState {
+            case .off:
+                message = ""
+            case .current where !previewing && !ReceiverLogin.canOpenAtLogin:
+                message = L("로그인 뒤 일반 연결로 이어지려면 위의 ‘로그인하면 자동으로 보내기 준비’를 켜 주세요.",
+                            "Turn on “Get ready to share when I log in” above to resume the regular connection after sign-in.")
+            case .current:
+                message = ""
+            case .reinstall:
+                message = L("이 앱에 맞는 부팅 도우미를 다시 설치해 주세요.",
+                            "Reinstall the startup helper for this version of the app.")
+            case nil:
+                message = checkingLoginWindow || previewing ? "" :
+                    L("부팅 도우미 상태를 확인하지 못했어요. 보내는 앱을 다시 열어 주세요.",
+                      "Couldn't check the startup helper. Reopen the host app.")
+            }
+        }
+        loginWindowStatus.stringValue = message
+        loginWindowStatus.isHidden = message.isEmpty
+        fitWindow()
+    }
+
+    @objc private func toggleLoginWindow() {
+        let install = loginWindowSwitch.state == .on
+        changeLoginWindow(install: install)
+    }
+
+    @objc private func reinstallLoginWindowHelper() { changeLoginWindow(install: true) }
+
+    private func changeLoginWindow(install: Bool) {
+        guard !previewing, !changingLoginWindow, loginWindowState != nil else { return }
+        changingLoginWindow = true
+        renderLoginWindow()
+        let opensAtLogin = ReceiverLogin.canOpenAtLogin
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let missing = install ? LoginWindowSetup.missingRequirements(opensAtLogin: opensAtLogin) : []
+            if !missing.isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.changingLoginWindow = false
+                    self.renderLoginWindow()
+                    self.showLoginWindowMessage(L("먼저 이 항목을 확인해 주세요.", "Check these items first."),
+                                                detail: missing.map { "• " + $0 }.joined(separator: "\n\n"))
+                }
+                return
+            }
+
+            let result = LoginWindowSetup.change(install: install)
+            let state = LoginWindowSetup.state
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.changingLoginWindow = false
+                self.loginWindowState = state
+                self.renderLoginWindow()
+                let reachedState = state == (install ? .current : .off)
+                if result == .failed || (result == .done && !reachedState) {
+                    self.showLoginWindowMessage(L("부팅 도우미를 바꾸지 못했어요.", "Couldn't change the startup helper."),
+                                                detail: L("보내는 계정으로 로그인했는지 확인하고 다시 시도해 주세요.",
+                                                          "Make sure you're signed in to the host account and try again."))
+                }
+            }
+        }
+    }
+
+    private func showLoginWindowMessage(_ title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: L("확인", "OK"))
+        window.makeKeyAndOrderFront(nil)
+        alert.beginSheetModal(for: window)
     }
 
     @objc private func openReceiverAccessibilitySettings() {
@@ -282,6 +395,10 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?" + pane) {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        refreshLoginWindow()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -384,6 +501,15 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["FINAL_FUSION_PREVIEW_MODE"] == "agent" { setMode(.agent) }
         refreshSenderState()
         refreshViewerState()
+        if !receiverOnly {
+            if ProcessInfo.processInfo.environment["FINAL_FUSION_PREVIEW_STATE"] == "login-update" {
+                loginWindowState = .reinstall
+                fileVaultNote.isHidden = false
+            } else {
+                loginWindowState = .off
+            }
+            renderLoginWindow()
+        }
         switch ProcessInfo.processInfo.environment["FINAL_FUSION_PREVIEW_STATE"] {
         case "connecting":
             if receiverOnly {
@@ -476,6 +602,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         }
 
         if !receiverOnly {
+            buildSenderLoginControls()
             directEnabled.state = LocalSetup.directEnabled() ? .on : .off
             directEnabled.target = self
             directEnabled.action = #selector(saveDirectOption)
@@ -615,6 +742,41 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         return row
     }
 
+    private func buildSenderLoginControls() {
+        var controls: [NSView] = [
+            explained(login, "이 맥에 로그인하면 파이널 퓨전이 열려서 보내기를 준비해요.",
+                      "Final Fusion opens and gets ready to share when you sign in to this Mac."),
+            loginStatus
+        ]
+        if #available(macOS 14, *) {
+            loginWindowSwitch.target = self
+            loginWindowSwitch.action = #selector(toggleLoginWindow)
+            loginWindowSwitch.setAccessibilityLabel(LoginWindowSetup.title)
+            loginWindowSwitch.isEnabled = false
+            let label = NSTextField(labelWithString: LoginWindowSetup.title)
+            label.font = .systemFont(ofSize: 14)
+            let toggle = row([loginWindowSwitch, label])
+            toggle.alignment = .centerY
+            let explanation = hint(L("미리 승인한 받는 맥에서만 로그인 전에 macOS 화면 공유에 연결할 수 있어요.",
+                                     "Only previously approved viewer Macs can reach macOS Screen Sharing before sign-in."))
+            fileVaultNote.stringValue = L("FileVault가 켜져 있어요. 재시동 뒤 이 맥 앞에서 디스크 잠금을 먼저 풀어야 연결할 수 있어요.",
+                                          "FileVault is on. Unlock the disk at this Mac after a restart before connecting.")
+            for field in [loginWindowStatus, fileVaultNote] {
+                field.font = .systemFont(ofSize: 13)
+                field.textColor = .systemOrange
+                field.isHidden = true
+            }
+            reinstallLoginWindow.set(L("부팅 도우미 다시 설치", "Reinstall startup helper"), symbol: "arrow.down.circle",
+                                     target: self, action: #selector(reinstallLoginWindowHelper))
+            reinstallLoginWindow.isHidden = true
+            for field in [explanation, fileVaultNote, loginWindowStatus] {
+                field.widthAnchor.constraint(equalToConstant: 564).isActive = true
+            }
+            controls += [toggle, explanation, fileVaultNote, loginWindowStatus, reinstallLoginWindow]
+        }
+        column(senderLoginControls, controls)
+    }
+
     private func senderPage() -> NSView {
         column(sharingControls, [
             sharingLine,
@@ -663,9 +825,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             relayRow,
             hint(L("처음 한 번만: ‘설정 안내 복사’를 누르고 AI 도우미에 붙여넣으면 연결 서버를 만들어 줘요.",
                    "One-time setup: click “Copy setup guide” and paste it into an AI assistant on this Mac to set up the connection server.")),
-            explained(login, "이 맥을 켜면 파이널 퓨전이 저절로 열려요. 집에 아무도 없어도 밖에서 연결할 수 있어요.",
-                      "Final Fusion opens by itself when this Mac starts, so you can connect from outside even when nobody is home."),
-            loginStatus,
+            column(manualLoginSlot, []),
             explained(directEnabled, "두 컴퓨터가 ‘다리’를 거치지 않고 곧바로 이어져요. 더 빠르고 또렷해요. 곧바로 안 될 때는 저절로 다리를 거쳐 이어지니 켜 두세요.",
                       "The two computers join straight to each other instead of over the “bridge”: faster and sharper. When that isn't possible the bridge is used by itself, so leave this on."),
             hint(L("권장 인터넷 속도 · 올리기 25 Mbps, 내려받기 2 Mbps", "Recommended internet speed · 25 Mbps up, 2 Mbps down"))
@@ -839,7 +999,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
                            "쓰다가 불편한 점이 있을 때 누르세요. AI 도우미에 붙여넣으면, 무엇이 불편한지 묻고 알아서 고쳐 줘요.",
                            "Click when something bothers you. Paste into an AI assistant and it asks what is wrong, then fixes it.")])
         ], tone: .section)
-        return page([intro, setup, viewers, first, fix])
+        let settings = card(L("설정", "Settings"), "gearshape", [column(agentLoginSlot, [])])
+        return page([intro, setup, viewers, first, settings, fix])
     }
 
     private func receiverAgentPage() -> NSView {
@@ -876,6 +1037,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         } else {
             (agent ? agentSharingSlot : manualSharingSlot).addArrangedSubview(sharingControls)
             (agent ? agentApprovalSlot : manualApprovalSlot).addArrangedSubview(approvalControls)
+            (agent ? agentLoginSlot : manualLoginSlot).addArrangedSubview(senderLoginControls)
             if viewerControls.superview == nil { manualViewerSlot.addArrangedSubview(viewerControls) }
         }
         agentPage?.isHidden = !agent

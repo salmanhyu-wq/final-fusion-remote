@@ -12,6 +12,7 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
     private var peerReady = false
     private var pumping = false
     private var stopped = false
+    private var loginKeepAlive: DispatchSourceTimer?
     private var onEndpoint: ((NWEndpoint.Port) -> Void)?
     private var onFailure: (() -> Void)?
 
@@ -31,7 +32,9 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
         self.onEndpoint = onEndpoint
         self.onFailure = onFailure
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 20
+        // Desktop connections have their own shorter response timer. The
+        // native login window can wait without sending any framebuffer data.
+        configuration.timeoutIntervalForRequest = 120
         configuration.timeoutIntervalForResource = 24 * 60 * 60
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         self.session = session
@@ -78,6 +81,24 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
 
     func close() { queue.async { self.finish(notify: false) } }
 
+    func keepAliveDuringMacLogin() {
+        queue.async {
+            guard self.loginKeepAlive == nil, !self.stopped else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now(), repeating: .seconds(5))
+            timer.setEventHandler { [weak self] in
+                self?.socket?.sendPing { [weak self] error in
+                    guard let error else { return }
+                    let cause = error as NSError
+                    NSLog("Final Fusion login relay ping failed: %@ %ld", cause.domain, cause.code)
+                    self?.queue.async { [weak self] in self?.finish(notify: true) }
+                }
+            }
+            self.loginKeepAlive = timer
+            timer.resume()
+        }
+    }
+
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
                     didOpenWithProtocol protocol: String?) {
         queue.async {
@@ -92,7 +113,12 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        queue.async { self.finish(notify: true) }
+        queue.async {
+            if self.loginKeepAlive != nil, let cause = error as NSError? {
+                NSLog("Final Fusion login relay ended: %@ %ld", cause.domain, cause.code)
+            }
+            self.finish(notify: true)
+        }
     }
 
     private func pumpIfReady() {
@@ -141,6 +167,8 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
     private func finish(notify: Bool) {
         guard !stopped else { return }
         stopped = true
+        loginKeepAlive?.cancel()
+        loginKeepAlive = nil
         listener?.cancel()
         peer?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)

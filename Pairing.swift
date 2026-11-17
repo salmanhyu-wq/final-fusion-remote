@@ -51,8 +51,10 @@ func strictHex(_ input: String, count: Int) -> Data? {
 }
 
 enum LocalSetup {
+    private static let directory = Bundle.main.object(forInfoDictionaryKey: "FinalFusionSettingsDirectory") as? String
+        ?? "Final Fusion"
     static let home = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Final Fusion", isDirectory: true)
+        .appendingPathComponent(directory, isDirectory: true)
     private static var config: URL { home.appendingPathComponent("relay.json") }
     static let reportURL = home.appendingPathComponent("receiver-diagnostics.json")
     private static let directURL = home.appendingPathComponent("direct.txt")
@@ -149,7 +151,7 @@ enum LocalSetup {
 }
 
 func secureConnection(_ profile: ReceiverProfile, host: NWEndpoint.Host = "127.0.0.1",
-                      port: NWEndpoint.Port) throws -> NWConnection {
+                      port: NWEndpoint.Port, allowLoginWindow: Bool = false) throws -> NWConnection {
     guard profile.valid, let pin = strictHex(profile.pin, count: 32) else {
         throw StudioError.message(L("연결 설정을 읽을 수 없어요.", "Couldn't read the connection settings."))
     }
@@ -158,6 +160,10 @@ func secureConnection(_ profile: ReceiverProfile, host: NWEndpoint.Host = "127.0
     sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
     sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, nativePixelsProtocol)
     sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, directProtocol)
+    if allowLoginWindow {
+        sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, loginWindowProtocol)
+        sec_protocol_options_add_tls_application_protocol(tls.securityProtocolOptions, legacyLoginWindowProtocol)
+    }
     sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, trust, complete in
         let ref = sec_trust_copy_ref(trust).takeRetainedValue()
         let certificate: SecCertificate?
@@ -221,7 +227,10 @@ final class HostLink {
         stopped = true
         output.fileHandleForReading.readabilityHandler = nil
         try? input.fileHandleForWriting.close()
-        if process.isRunning { process.terminate() }
+        let helper = process
+        DispatchQueue.global().asyncAfter(deadline: .now() + 8) {
+            if helper.isRunning { helper.terminate() }
+        }
     }
 
     private func receive(_ data: Data) {

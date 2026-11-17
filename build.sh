@@ -49,6 +49,10 @@ COPYFILE_DISABLE=1 /bin/cp -- Link/ui/{icon.svg,index.html,patch.png,style.css,v
 )
 /usr/bin/lipo -create "$temp/StudioLink-arm64" "$temp/StudioLink-amd64" -output "$app/Contents/Helpers/StudioLink"
 /usr/bin/codesign --force --sign "$sign_identity" "$app/Contents/Helpers/StudioLink"
+# Embed the script in the executable for authorization and include a terminal fallback.
+printf 'let loginWindowInstallerBase64 = "%s"\n' "$(/usr/bin/base64 -b 0 -i install-login-window.sh)" \
+  > "$temp/EmbeddedLoginWindowInstaller.swift"
+/bin/cp -- install-login-window.sh "$app/Contents/Resources/"
 for arch in arm64 x86_64; do
   set --
   if [[ "$arch" == x86_64 ]]; then
@@ -59,7 +63,7 @@ for arch in arm64 x86_64; do
   /usr/bin/xcrun --sdk macosx swiftc -swift-version 5 -O -sdk "$sdk" \
     -target "$arch-apple-macosx11.0" -module-cache-path "$out/ModuleCache" "$@" \
     -Xlinker -weak_framework -Xlinker ScreenCaptureKit \
-    -module-name StudioRemote -import-objc-header ReceiverEvents.h Localization.swift Design.swift AgentSupport.swift Wire.swift InputBehavior.swift Audio.swift Clipboard.swift TrackpadGestures.swift ReceiverUpdate.swift Host.swift Viewer.swift PointerFeedback.swift ReceiverMode.swift RelayTunnel.swift Pairing.swift SelfTest.swift SessionTest.swift UIPreview.swift main.swift \
+    -module-name StudioRemote -import-objc-header ReceiverEvents.h Localization.swift Design.swift AgentSupport.swift Wire.swift InputBehavior.swift Audio.swift Clipboard.swift TrackpadGestures.swift ReceiverUpdate.swift Host.swift Viewer.swift PointerFeedback.swift ReceiverMode.swift RelayTunnel.swift MacLoginWindow.swift LoginWindowSetup.swift "$temp/EmbeddedLoginWindowInstaller.swift" Pairing.swift SelfTest.swift SessionTest.swift UIPreview.swift main.swift \
     "$temp/VirtualDisplay-$arch.o" -o "$temp/StudioRemote-$arch"
 done
 /usr/bin/lipo -create "$temp/StudioRemote-arm64" "$temp/StudioRemote-x86_64" -output "$app/Contents/MacOS/StudioRemote"

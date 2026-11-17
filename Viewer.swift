@@ -33,6 +33,10 @@ final class StudioViewer {
     private var feedbackWork: DispatchWorkItem?
     private var recoveryWork: DispatchWorkItem?
     private var tunnel: RelayTunnel?
+    private var loginWindow: MacLoginWindow?
+    private var loginReconnect: DispatchWorkItem?
+    private var loginReconnectUntil: Date?
+    private var relaySession: (profile: ReceiverProfile, greeting: Data, pixels: ReceiverNativePixels?)?
     private var profile: ReceiverProfile?
     private var directTrials: [Wire] = []
     private var directTimeout: DispatchWorkItem?
@@ -103,28 +107,23 @@ final class StudioViewer {
             greeting.append(large ? 1 : 0)
             if let options = options { greeting.append(options.bytes) }
         }
-        let tunnel = RelayTunnel()
-        self.tunnel = tunnel
-        lastSeen = Date()
-        try tunnel.start(profile, onEndpoint: { [weak self, weak tunnel] port in
-            guard let self = self, let tunnel = tunnel, self.tunnel === tunnel else { return }
-            do { try self.beginStream(profile: profile, port: port, greeting: greeting, nativePixels: nativePixels) }
-            catch { self.stop(error.localizedDescription) }
-        }, onFailure: { [weak self, weak tunnel] in
-            guard let self = self, let tunnel = tunnel, self.tunnel === tunnel else { return }
-            if self.connectionPath == .relay {
-                self.stop(L("연결이 끊겼어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "The connection dropped. Check your internet and make sure the host Mac is sharing."))
-            }
-        })
+        relaySession = (profile, greeting, nativePixels)
+        try connectRelay()
         status(onUpdateVersion == nil ? L("보내는 맥에 안전하게 연결하고 있어요…", "Connecting securely to the host Mac…") : L("새 버전을 확인하고 있어요…", "Checking for a new version…"))
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 2, repeating: 2)
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
+            guard self.loginWindow == nil, self.loginReconnect == nil else { return }
+            if let deadline = self.loginReconnectUntil, Date() >= deadline {
+                self.stop(L("Mac에 로그인한 뒤 파이널 퓨전이 켜지면 다시 연결해 주세요.",
+                            "Sign in to the Mac and try again once Final Fusion starts."))
+                return
+            }
             let connected = self.sawScreens || (self.onUpdateVersion != nil && self.acceptsUpdates)
             let startupTimeout: TimeInterval = self.onUpdateVersion == nil ? 24 : 16
             if Date().timeIntervalSince(self.lastSeen) > (connected ? 12 : (self.waitingForApproval ? 82 : startupTimeout)) {
-                self.stop(L("보내는 맥에서 응답이 없어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "No response from the host Mac. Check your internet and make sure the host Mac is sharing."))
+                self.relayFailed(L("보내는 맥에서 응답이 없어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "No response from the host Mac. Check your internet and make sure the host Mac is sharing."))
             } else if connected {
                 self.sendHeartbeat()
                 self.reportIfReady()
@@ -193,10 +192,78 @@ final class StudioViewer {
         wire?.send(.diagnostics, data: data)
     }
 
-    private func beginStream(profile: ReceiverProfile, port: NWEndpoint.Port, greeting: Data,
-                             nativePixels: ReceiverNativePixels?) throws {
-        receive(on: Wire(try secureConnection(profile, port: port), queue: .main),
-                greeting: greeting, profile: profile, nativePixels: nativePixels)
+    private func connectRelay() throws {
+        guard let session = relaySession else { return }
+        let tunnel = RelayTunnel()
+        self.tunnel = tunnel
+        lastSeen = Date()
+        try tunnel.start(session.profile, onEndpoint: { [weak self, weak tunnel] port in
+            guard let self, let tunnel, self.tunnel === tunnel else { return }
+            do {
+                let connection = try secureConnection(session.profile, port: port, allowLoginWindow: self.onUpdateVersion == nil)
+                let wire = Wire(connection, queue: .main)
+                wire.onLoginWindow = { [weak self, weak wire] connection, current in
+                    guard let self, let wire, self.wire === wire else { connection.cancel(); return }
+                    self.wire = nil
+                    guard current else {
+                        connection.cancel()
+                        self.loginReconnectUntil = nil
+                        self.stop(L("보내는 맥의 부팅 도우미가 예전 버전이에요. 보내는 맥에 로그인해 부팅 도우미를 다시 설치해 주세요.",
+                                    "The host Mac's startup helper is out of date. Sign in to the host Mac and install the startup helper again."))
+                        return
+                    }
+                    self.openLoginWindow(connection, greeting: session.greeting)
+                }
+                self.receive(on: wire, greeting: session.greeting, profile: session.profile, nativePixels: session.pixels)
+            } catch { self.relayFailed(error.localizedDescription) }
+        }, onFailure: { [weak self, weak tunnel] in
+            guard let self, let tunnel, self.tunnel === tunnel, self.connectionPath == .relay, self.loginWindow == nil else { return }
+            self.relayFailed(L("연결이 끊겼어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "The connection dropped. Check your internet and make sure the host Mac is sharing."))
+        })
+    }
+
+    private func openLoginWindow(_ connection: NWConnection, greeting: Data) {
+        if loginReconnectUntil != nil {
+            connection.cancel()
+            relayFailed(L("Mac 로그인을 마친 뒤 다시 연결해 주세요.", "Finish signing in to the Mac, then connect again."))
+            return
+        }
+        let login = MacLoginWindow(remote: connection)
+        loginWindow = login
+        tunnel?.keepAliveDuringMacLogin()
+        status(L("Mac 화면 공유 창에서 보내는 맥의 암호를 입력하세요.",
+                 "Enter the host Mac's password in the Screen Sharing window."))
+        login.onFinish = { [weak self, weak login] handoff, reason in
+            guard let self, let login, self.loginWindow === login else { return }
+            self.loginWindow = nil
+            if handoff {
+                // The host Mac drops the login link once someone signs in. Final
+                // Fusion there needs a moment to start before it accepts viewers.
+                self.loginReconnectUntil = Date().addingTimeInterval(90)
+                self.status(L("로그인한 맥에 다시 연결하는 중…", "Reconnecting after Mac login…"))
+                self.relayFailed(L("Mac 로그인을 마친 뒤 다시 연결해 주세요.", "Finish signing in to the Mac, then connect again."))
+            } else { self.stop(reason) }
+        }
+        login.start(greeting: greeting)
+    }
+
+    private func relayFailed(_ reason: String) {
+        guard let deadline = loginReconnectUntil, Date() < deadline else { stop(reason); return }
+        wire?.onEnd = nil
+        wire?.close()
+        wire = nil
+        tunnel?.close()
+        tunnel = nil
+        loginReconnect?.cancel()
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self, !self.suppressFinish else { return }
+            self.loginReconnect = nil
+            guard Date() < deadline else { self.stop(reason); return }
+            do { try self.connectRelay() }
+            catch { self.relayFailed(error.localizedDescription) }
+        }
+        loginReconnect = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: retry)
     }
 
     func receive(on wire: Wire, greeting: Data, profile: ReceiverProfile? = nil,
@@ -236,7 +303,7 @@ final class StudioViewer {
             if self.onUpdateVersion != nil {
                 self.stop(L("새 버전을 확인하지 못했어요. 보내는 맥이 보내기 중인지 확인해 주세요.", "Couldn't check for a new version. Make sure the host Mac is sharing."))
             } else {
-                self.stop(self.sawScreens ? reason : L("연결하지 못했어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "Couldn't connect. Check your internet and make sure the host Mac is sharing."))
+                self.relayFailed(self.sawScreens ? reason : L("연결하지 못했어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "Couldn't connect. Check your internet and make sure the host Mac is sharing."))
             }
         }
     }
@@ -299,6 +366,12 @@ final class StudioViewer {
     func stop(_ reason: String = L("연결을 끝냈어요.", "Disconnected.")) {
         if suppressFinish { return }
         suppressFinish = true
+        loginReconnect?.cancel()
+        loginReconnect = nil
+        loginReconnectUntil = nil
+        loginWindow?.stop()
+        loginWindow = nil
+        relaySession = nil
         finishDirectTrials()
         handoffRelay?.close()
         handoffRelay = nil
@@ -362,6 +435,7 @@ final class StudioViewer {
                 stop(L("보내는 맥의 화면 정보를 읽지 못했어요. 다시 연결해 주세요.", "Couldn't read the host Mac's screen info. Please connect again.")); return
             }
             sawScreens = true
+            loginReconnectUntil = nil
             reportAvailable = displays.allSatisfy { $0.receiverDiagnostics == true }
             for display in displays where display.videoFeedback == true {
                 let greeting = VideoFeedback(receivedBytes: 0, requestKeyframe: false)

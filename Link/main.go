@@ -83,17 +83,25 @@ func saveJSON(path string, value any) error {
 	return os.Rename(file.Name(), path)
 }
 
-func loadHostState(path string) (hostState, error) {
+func readHostState(path string) (hostState, error) {
 	var state hostState
 	raw, err := os.ReadFile(path)
+	if err != nil {
+		return state, err
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return state, err
+	}
+	if !validHex(state.Invitation, 16) || len(state.Cert) == 0 || len(state.Key) != ed25519.PrivateKeySize || state.Trusted == nil {
+		return state, errors.New(tr("기존 보내기 설정을 읽을 수 없어요.", "Couldn't read the existing sharing settings."))
+	}
+	return state, nil
+}
+
+func loadHostState(path string) (hostState, error) {
+	state, err := readHostState(path)
 	switch {
 	case err == nil:
-		if err := json.Unmarshal(raw, &state); err != nil {
-			return state, err
-		}
-		if !validHex(state.Invitation, 16) || len(state.Cert) == 0 || len(state.Key) != ed25519.PrivateKeySize || state.Trusted == nil {
-			return state, errors.New(tr("기존 보내기 설정을 읽을 수 없어요.", "Couldn't read the existing sharing settings."))
-		}
 		if len(state.MacCert) > 0 || len(state.MacKey) > 0 {
 			return state, nil
 		}
@@ -177,9 +185,13 @@ func (g *gateway) decide(id string, allow bool, code string) bool {
 	}
 }
 
-func (g *gateway) allowed(conn net.Conn, token []byte) bool {
+func deviceTokenID(token []byte) string {
 	sum := sha256.Sum256(token)
-	id := hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])
+}
+
+func (g *gateway) allowed(conn net.Conn, token []byte) bool {
+	id := deviceTokenID(token)
 	g.lock.Lock()
 	if g.state.Trusted[id] {
 		g.lock.Unlock()
@@ -377,6 +389,13 @@ func clientTLS(p profile) *tls.Config {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "login-window-host" && runtime.GOOS == "darwin" {
+		if err := runLoginWindowHost(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "relay-id" && runtime.GOOS == "darwin" {
 		_, room, err := relayIdentity(os.Args[2])
 		if err != nil {

@@ -80,6 +80,16 @@ enum AgentGuide {
 
     static func quoted(_ path: String) -> String { "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
+    private static var hostLoginWindowHelp: String {
+        L("재시동 뒤 로그인 화면에 연결하려면 보내는 맥의 화면 공유를 켜 계정을 허용하고, 앱의 ‘로그인하면 자동으로 보내기 준비’를 켜고, Mac 받는 기기를 한 번 승인해. 설정의 ‘재시동 후 로그인 화면에서도 연결’을 켜거나 끄고, macOS 관리자 승인은 사용자가 직접 해. 업데이트 뒤 ‘부팅 도우미 다시 설치’가 보이면 눌러. FileVault가 켜져 있으면 재시동 뒤 맥 앞에서 디스크 잠금을 먼저 풀어야 해.",
+          "For login-screen access after restart, turn on Screen Sharing on the host and allow its account, turn on “Get ready to share when I log in,” and approve a Mac viewer once. Turn “Connect to the login screen after restart” on or off in Settings, and let the user handle macOS administrator approval. If “Reinstall startup helper” appears after an update, click it. With FileVault on, unlock the disk at the host Mac after a restart.")
+    }
+
+    private static var viewerLoginWindowHelp: String {
+        L("보내는 맥에서 재시동 후 로그인 화면 연결을 켜 뒀다면, 이미 승인된 Mac 받는 앱에서 ‘연결하기’를 눌러. macOS 화면 공유 창에서 사용자가 보내는 맥 계정 암호를 직접 입력하면 일반 원격 화면으로 이어져. FileVault 디스크 잠금은 보내는 맥 앞에서 먼저 풀어야 해.",
+          "If the host enabled login-screen access after restart, click “Connect” in a previously approved Mac viewer. Have the user enter the host account password in the macOS Screen Sharing window. The regular remote screen opens after sign-in. A FileVault disk lock must be unlocked at the host first.")
+    }
+
     static func setup() -> String {
         L("""
         [파이널 퓨전 · ① 시작 준비]
@@ -98,6 +108,8 @@ enum AgentGuide {
         5. --support-report에서 screenRecording이나 accessibility가 false면, 사용자에게 파이널 퓨전 창의 「설정 열기」로 허용하라고 안내해. 스위치가 이미 켜져 있으면 예전 버전용이라 －로 지우고 ＋로 다시 추가해야 해. 화면 녹화는 허용 뒤 「앱 다시 열기」가 필요해.
         6. sharing이 true가 되면 끝이야. 사용자에게 「② 받는 앱 보내기」로 넘어가라고 알려 줘.
 
+        \(hostLoginWindowHelp)
+
         지킬 것: 중계 비밀, Cloudflare 토큰, 설정 폴더의 키 파일을 출력하거나 다른 곳에 복사하지 마. 가입·약관·결제는 사용자가 직접 해.
         """, """
         [Final Fusion · ① Get ready]
@@ -115,6 +127,8 @@ enum AgentGuide {
         4. Save the address with \(executable) --set-relay <https address> and start sharing with \(executable) --start-sharing.
         5. If --support-report shows screenRecording or accessibility as false, tell the user to allow them with “Open settings” in the Final Fusion window. A switch that is already on belongs to an older version: remove it with − and add the app again with +. Screen Recording needs “Reopen app” afterwards.
         6. When sharing is true you're done. Tell the user to continue with “② Send the viewer app”.
+
+        \(hostLoginWindowHelp)
 
         Rules: never print or copy the relay secret, Cloudflare tokens or the key files in the settings folder. The user handles sign-up, terms and payment personally.
         """)
@@ -177,6 +191,8 @@ enum AgentGuide {
         5. 받는 맥에는 \(executable) --send-receiver-update 로 DIY 업데이트를 요청해. 구버전 받는 앱에서는 첫 설치 확인이 필요할 수 있고, 새 받는 앱은 파일을 확인한 뒤 자동 설치해. Windows 받는 쪽은 --export-receivers로 새 .exe를 만들어 ② 단계처럼 링크로 보내.
         6. --receiver-report의 receiverAppVersion이 새 버전이면 끝이야. 바꾼 내용과 확인 결과를 짧게 알려 줘.
 
+        \(hostLoginWindowHelp)
+
         지킬 것: 번들 ID(app.finalfusion.remote, app.finalfusion.remote.receiver), 설정 폴더, 업데이트 디스크 안의 「Studio Receiver.app」 이름은 바꾸지 마. 중계 비밀과 기기 키를 출력하거나 올리지 마. 지우거나 덮어쓰기 전에 복구본을 만들어.
         """, """
         [Final Fusion · ④ Fix it now]
@@ -198,6 +214,8 @@ enum AgentGuide {
         5. Use \(executable) --send-receiver-update to request a DIY update for Mac viewers. Older viewers may show an install prompt once. Newer viewers verify and install the update automatically. For Windows viewers, make a new .exe with --export-receivers and send a link as in step ②.
         6. You're done when receiverAppVersion in --receiver-report shows the new version. Briefly report what changed and how you checked it.
 
+        \(hostLoginWindowHelp)
+
         Rules: keep the bundle IDs (app.finalfusion.remote, app.finalfusion.remote.receiver), the settings folder and the “Studio Receiver.app” name inside update disks. Never print or upload the relay secret or device keys. Make a backup before deleting or overwriting anything.
         """)
     }
@@ -208,12 +226,14 @@ enum AgentGuide {
         [파이널 퓨전 받기 · 바로 고치기]
         너는 AI 에이전트야. 이 내용은 파이널 퓨전 받는 앱(\(application), 버전 \(version))에서 복사됐어.
         먼저 사용자에게 무엇이 불편한지 물어봐. 프로그램을 고치는 일은 보내는 맥에서 해야 해: 사용자에게 원격 화면에서 보내는 맥의 파이널 퓨전을 열고 「④ 바로 고치기」의 「④ 안내 복사」를 눌러 그쪽 AI 도우미에 붙여넣으라고 안내해. 이 기기에서 할 수 있는 일(권한 허용, 앱 위치, 키보드·화질 설정 확인)은 여기서 도와줘.
+        \(viewerLoginWindowHelp)
         이 기기 진단:
         \(report)
         """, """
         [Final Fusion Viewer · Fix it now]
         You are an AI agent. This was copied from the Final Fusion viewer (\(application), version \(version)).
         First ask the user what's bothering them. Program changes happen on the host Mac: tell the user to open Final Fusion on the host Mac through the remote screen, click “Copy step ④” under “④ Fix it now”, and paste it into the AI assistant there. Help here with what this device can do itself (permissions, app location, keyboard and quality settings).
+        \(viewerLoginWindowHelp)
         This device's diagnostics:
         \(report)
         """)

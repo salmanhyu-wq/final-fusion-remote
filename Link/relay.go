@@ -17,12 +17,19 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 )
 
 var relayHost = regexp.MustCompile(`^[A-Za-z0-9]+(?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9]+(?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$`)
+
+type relaySlotBusy struct{}
+
+func (relaySlotBusy) Error() string {
+	return tr("다른 기기가 이미 연결 중이에요. 잠시 뒤 다시 시도하세요.", "Another device is already connected. Try again in a moment.")
+}
 
 func relayOrigin(value string) (*url.URL, error) {
 	u, err := url.Parse(value)
@@ -79,7 +86,7 @@ func dialRelay(ctx context.Context, origin, path string, headers http.Header) (*
 	})
 	if err != nil {
 		if response != nil && response.StatusCode == http.StatusConflict {
-			return nil, errors.New(tr("다른 기기가 이미 연결 중이에요. 잠시 뒤 다시 시도하세요.", "Another device is already connected. Try again in a moment."))
+			return nil, relaySlotBusy{}
 		}
 		return nil, errors.New(tr("연결 서버에 닿지 않았어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "Couldn't reach the connection server. Check your internet and make sure the host Mac is sharing."))
 	}
@@ -170,17 +177,28 @@ func serveHost(origin, dir, localSocket string) error {
 			Profile any    `json:"profile"`
 		}{"ready", receiver})
 		wait = time.Second
-		kind, data, err := socket.Read(ctx)
-		if err == nil && kind == websocket.MessageText && string(data) == "paired" {
-			pipe := websocket.NetConn(ctx, socket, websocket.MessageBinary)
+		withRelayViewer(ctx, socket, func(_ context.Context, pipe net.Conn) {
 			g.handle(tls.Server(pipe, tlsConfig))
-		}
-		_ = socket.CloseNow()
+		})
 		if !relayPause(ctx, time.Second) {
 			break
 		}
 	}
 	return nil
+}
+
+func withRelayViewer(ctx context.Context, socket *websocket.Conn, handle func(context.Context, net.Conn)) {
+	// Let the relay see a Close frame before cancelling its reads and writes.
+	// The login helper and the desktop sender use the same relay slot.
+	closeSocket := sync.OnceFunc(func() { _ = socket.Close(websocket.StatusNormalClosure, "") })
+	stop := context.AfterFunc(ctx, closeSocket)
+	defer stop()
+	defer closeSocket()
+	stream := context.WithoutCancel(ctx)
+	kind, data, err := socket.Read(stream)
+	if err == nil && kind == websocket.MessageText && string(data) == "paired" && ctx.Err() == nil {
+		handle(stream, websocket.NetConn(stream, socket, websocket.MessageBinary))
+	}
 }
 
 func hostTLS(state hostState) (*tls.Config, error) {

@@ -4,6 +4,9 @@ import Security
 
 let directProtocol = "studio-direct-1"
 let nativePixelsProtocol = "studio-direct-2"
+let loginWindowProtocol = "studio-mac-login-2"
+// A boot helper installed before 1.0.18. It is only recognised so the viewer can say what to do.
+let legacyLoginWindowProtocol = "studio-mac-login-1"
 
 enum Kind: UInt8 {
     case hello = 1, screens, format, video, input, keepAlive, failure, pairing, diagnostics, receiverUpdate, videoFeedback, receiverControl
@@ -352,6 +355,7 @@ final class Wire {
     private var pending = 0
 
     var onReady: (() -> Void)?
+    var onLoginWindow: ((NWConnection, _ current: Bool) -> Void)?
     var onMessage: ((Kind, UInt32, Data) -> Void)?
     var onEnd: ((String) -> Void)?
 
@@ -392,6 +396,17 @@ final class Wire {
             guard let self = self else { return }
             switch state {
             case .ready:
+                if let name = self.negotiatedProtocol, name == loginWindowProtocol || name == legacyLoginWindowProtocol,
+                   let callback = self.onLoginWindow, let connection = self.connection {
+                    self.ended = true
+                    connection.stateUpdateHandler = nil
+                    self.onLoginWindow = nil
+                    self.onReady = nil
+                    self.onMessage = nil
+                    self.onEnd = nil
+                    callback(connection, name == loginWindowProtocol)
+                    return
+                }
                 self.onReady?()
                 self.readHeader()
             case let .failed(error): self.end(error.localizedDescription)
@@ -517,6 +532,7 @@ final class Wire {
         connection?.cancel()
         let callback = onEnd
         onReady = nil
+        onLoginWindow = nil
         onMessage = nil
         onEnd = nil
         callback?(reason)

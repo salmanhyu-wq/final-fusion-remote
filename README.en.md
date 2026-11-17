@@ -1,4 +1,4 @@
-# Final Fusion 1.0.15
+# Final Fusion 1.0.19
 
 **I built this for myself.**
 
@@ -31,6 +31,19 @@ After you update the host, it offers a **DIY update** to older Mac viewers when 
 
 Full-quality sharing starts when the host resolution and fresh video are ready. When a virtual display becomes the main display on a Mac without a monitor, Final Fusion shares it directly. If the screen saver stays on, the viewer connects using the current display, then reconnects at full quality when the screen saver ends.
 
+## Connect to the login screen after restart (Mac)
+
+Use 1.0.19 or later on both Macs. [Build the app from source](DEVELOPMENT.md) to use this feature. The installer linked above is 1.0.4.
+
+1. On the host Mac, open **System Settings → General → Sharing → Screen Sharing**. Turn it on and allow the Mac account you’ll sign in to.
+2. In Final Fusion, turn on **Get ready to share when I log in**. Connect from the Mac viewer once and approve it on the host.
+3. In the host app’s **Settings**, turn on **Connect to the login screen after restart** and approve the macOS administrator prompt.
+4. After restarting the host, click **Connect** from the approved Mac viewer. Enter the host Mac account password in the macOS Screen Sharing window. The regular Final Fusion screen opens automatically after sign-in.
+
+Turn off the switch and approve the macOS prompt to remove the helper. If **Reinstall startup helper** appears after you update the host, click it.
+
+Only previously approved Mac viewers can reach macOS Screen Sharing through Final Fusion before sign-in. If FileVault is on, unlock the disk at the host Mac first after a restart. This feature uses the Mac viewer.
+
 The host targets macOS 14 or later. The universal Mac viewer targets macOS 11 or later. An earlier version was tested on an Intel MacBook at 2560×1600. The 1.0 checks are local simulations and builds; Apple Silicon Mac viewers and Windows laptops have not been tested on physical receiver hardware. The Windows build targets 64-bit Windows 10 or later with Edge or Chrome; full-screen system keys still need physical testing. Windows and Mac clipboard sharing is unavailable.
 
-The linked installer is version 1.0.4. For version 1.0.15, see [Build and test](DEVELOPMENT.md). Personal local use and modification are allowed; redistribution rights are reserved. See [LICENSE](LICENSE). When filing issues, share reproducible steps and use the redacted diagnostics. Do not attach a personalized viewer, relay address, pairing code, or a screenshot showing private material.
+The linked installer is version 1.0.4. For version 1.0.19, see [Build and test](DEVELOPMENT.md). Personal local use and modification are allowed; redistribution rights are reserved. See [LICENSE](LICENSE). When filing issues, share reproducible steps and use the redacted diagnostics. Do not attach a personalized viewer, relay address, pairing code, or a screenshot showing private material.
