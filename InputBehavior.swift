@@ -335,7 +335,7 @@ final class SessionKeyboardLayout {
         } catch { return .senderKept }
         if TISSelectInputSource(target) == noErr {
             change = next
-            return .matched
+            return MacInputSource.currentID() == id ? .matched : .senderKept
         }
         if let previous = previous { try? Self.save(previous) }
         else { try? FileManager.default.removeItem(at: Self.journal) }

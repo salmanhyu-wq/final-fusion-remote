@@ -1362,8 +1362,12 @@ private final class HostInput {
     private var smartZoomApp: String?
     private var koreanPair: (korean: String, english: String)?
     var supportsKoreanCaps: Bool { koreanPair != nil }
-    private var lastKeyboardRequest: String?
-    private(set) var keyboardLayoutResult: KeyboardLayoutResult?
+    private var requestedKeyboardSource: String?
+    private var keyboardSourceRetry: DispatchWorkItem?
+    var keyboardLayoutResult: KeyboardLayoutResult? {
+        guard let id = requestedKeyboardSource else { return nil }
+        return MacInputSource.currentID() == id ? .matched : .senderKept
+    }
     private(set) var screenshotCopied: Bool?
 
     func beginSession(macInputMatching: Bool) {
@@ -1373,13 +1377,17 @@ private final class HostInput {
             : CGEventSource(stateID: .hidSystemState)
         if macInputMatching { source?.localEventsSuppressionInterval = 0 }
         koreanPair = macInputMatching ? MacInputSource.koreanPair() : nil
-        lastKeyboardRequest = nil
-        keyboardLayoutResult = nil
+        keyboardSourceRetry?.cancel()
+        keyboardSourceRetry = nil
+        requestedKeyboardSource = nil
         screenshotCopied = nil
     }
 
     func endSession() {
         release()
+        keyboardSourceRetry?.cancel()
+        keyboardSourceRetry = nil
+        requestedKeyboardSource = nil
         keyboardLayout.finish()
         if let capture = screenshot, capture.isRunning { capture.terminate() }
         screenshot = nil
@@ -1387,6 +1395,22 @@ private final class HostInput {
         smartZoomApp = nil
         koreanPair = nil
         source = nil
+    }
+
+    private func requestKeyboardSource(_ id: String) {
+        keyboardSourceRetry?.cancel()
+        keyboardSourceRetry = nil
+        requestedKeyboardSource = id
+        guard keyboardLayout.match(id) == .senderKept else { return }
+
+        // macOS can finish a source or focus change after the original request.
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self = self, self.requestedKeyboardSource == id else { return }
+            self.keyboardSourceRetry = nil
+            _ = self.keyboardLayout.match(id)
+        }
+        keyboardSourceRetry = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: retry)
     }
 
     func release() {
@@ -1425,14 +1449,14 @@ private final class HostInput {
         case .cursorShapes, .audio, .clipboard: break
         case .inputSource:
             guard macInputMatching, let id = input.keyboardInputSource,
-                  MacInputSource.validID(id), id != lastKeyboardRequest else { return }
-            lastKeyboardRequest = id
-            keyboardLayoutResult = keyboardLayout.match(id)
+                  MacInputSource.validID(id) else { return }
+            requestKeyboardSource(id)
         case .koreanCaps:
             guard let pair = koreanPair, let current = MacInputSource.currentID() else { return }
-            let next = current == pair.korean ? pair.english : pair.korean
-            lastKeyboardRequest = nil
-            keyboardLayoutResult = keyboardLayout.match(next)
+            // Treat a repeated Caps press as the opposite of the pending request, even if
+            // macOS hasn't adopted that source yet.
+            let source = keyboardSourceRetry != nil ? requestedKeyboardSource ?? current : current
+            requestKeyboardSource(source == pair.korean ? pair.english : pair.korean)
         case .screenshotFull, .screenshotArea, .screenshotOptions:
             guard macInputMatching, let capture = capture else { return }
             if input.action == .screenshotFull || input.screenshotRegion != nil {

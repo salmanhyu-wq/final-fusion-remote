@@ -1,4 +1,4 @@
-# Final Fusion 1.0.20
+# Final Fusion 1.0.21
 
 **I built this for myself.**
 
@@ -6,15 +6,15 @@ The picture quality in Chrome Remote Desktop hurt my eyes, my old MacBook was no
 
 I wish you all the best in whatever you do.
 
-**[Build 1.0.20](DEVELOPMENT.md)** · The host requires macOS 14 or later.
+**[Build 1.0.21](DEVELOPMENT.md)** · The host requires macOS 14 or later.
 
-This version requires a [relay update](Relay/SETUP.md) and fresh approval for each viewer. Upgrade viewers or prepare new installers before cutting over the relay.
+Version 1.0.21 improves the order and retry behavior of Korean–English switching on Mac. When upgrading from 1.0.19 or earlier, [update the relay](Relay/SETUP.md) and approve each viewer again. Prepare new viewers before cutting over the relay.
 
 **Use a headless Mac mini or Mac Studio from an older laptop, like it was your Mac.** Work with a sharp remote display and familiar Mac shortcuts. If setup or troubleshooting gets stuck, copy the app’s guide into your own AI assistant.
 
 [한국어](README.md) · [Build and test](DEVELOPMENT.md) · [Source terms](LICENSE)
 
-1. On the Mac you want to control, open the downloaded `.dmg` and drag Final Fusion into **Applications**. This installer has not been notarized by Apple, so macOS may show a warning the first time you open it. See [Apple’s guidance](https://support.apple.com/en-us/102445).
+1. On the Mac you want to control, [build 1.0.21](DEVELOPMENT.md) and move Final Fusion into **Applications**. Apple has not notarized local builds, so macOS may show a warning the first time you open the app. See [Apple’s guidance](https://support.apple.com/en-us/102445).
 2. Open the host and choose **Copy step ①**. The guide helps set up a relay in your own Cloudflare account and enable Screen Recording and Accessibility.
 3. Choose your viewer device in step ②. Create its viewer on the host and share it privately with that device. Viewer packages contain connection details. On a Mac, move **파이널 퓨전 받기** into Applications and open it.
 4. Click **Connect** on the viewer and approve its six-digit code on the host. To use system shortcuts remotely on a Mac, choose **Open Accessibility settings** under **Shortcut permissions** and allow **파이널 퓨전 받기**. The Input Monitoring row turns green when macOS allows the app to listen for keyboard input.
@@ -48,4 +48,4 @@ Only previously approved Mac viewers can reach macOS Screen Sharing through Fina
 
 The host targets macOS 14 or later. The universal Mac viewer targets macOS 11 or later. An earlier version was tested on an Intel MacBook at 2560×1600. The 1.0 checks are local simulations and builds; Apple Silicon Mac viewers and Windows laptops have not been tested on physical receiver hardware. The Windows build targets 64-bit Windows 10 or later with Edge or Chrome; full-screen system keys still need physical testing. Windows and Mac clipboard sharing is unavailable.
 
-The linked installer is version 1.0.4. For version 1.0.19, see [Build and test](DEVELOPMENT.md). Personal local use and modification are allowed; redistribution rights are reserved. See [LICENSE](LICENSE). When filing issues, share reproducible steps and use the redacted diagnostics. Do not attach a personalized viewer, relay address, pairing code, or a screenshot showing private material.
+Personal local use and modification are allowed; redistribution rights are reserved. See [LICENSE](LICENSE). When filing issues, share reproducible steps and use the redacted diagnostics. Do not attach a personalized viewer, relay address, pairing code, or a screenshot showing private material.

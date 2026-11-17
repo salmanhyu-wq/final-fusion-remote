@@ -784,6 +784,7 @@ final class StudioViewer {
             return
         }
         flushPointer()
+        if input.action == .keyDown { sendKeyboardSourceIfChanged() }
         sendInput(input, ordered: true)
     }
 

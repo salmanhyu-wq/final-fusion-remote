@@ -53,6 +53,10 @@ To check 1.0.4 on hardware, disconnect the host monitor, reconnect from a Mac vi
 
 The self test checks the Opus round trip, and the session test checks that sound is sent only after a request, arrives in order, decodes to the test tone and stops on request. `--test-audio-capture <file>` captures the Mac's real sound for a few seconds with the speakers muted; it needs Screen Recording permission, so open the signed app with that argument (`open -n -W "$app" --args --test-audio-capture "$out/audio.txt"`) and read the file. Listening on a real viewer and checking lip sync remain hardware checks.
 
+## Mac input switching in 1.0.21
+
+The viewer checks its input source before sending a key down so that a detected change reaches the host before the key. The host checks the selected source and retries once after an unsuccessful change. The diagnostics report checks the host’s current selection instead of keeping the previous result.
+
 ## Mac viewer in 1.0.15
 
 New installer images contain the Mac viewer under its displayed name, **파이널 퓨전 받기**. DIY update images retain the bundle filename expected by older viewers. Once the old installer finishes, an eligible existing viewer installation changes to the Korean filename and reopens.
