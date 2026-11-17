@@ -69,7 +69,9 @@ The startup helper reads separate public app settings. The app compares the bund
 
 The system Screen Sharing client first connects to discover authentication options, then opens a new connection when the password is submitted. The login transport carries both connections over the approved TLS session. Go tests exercise two simultaneous streams and denial of an unapproved viewer. Use a fake viewer to check builds and previews.
 
-The 1.0.18 development build completed a physical restart, remote sign-in, handoff to regular Final Fusion and remote input on macOS 27.2.1. That result covers the login transport. The new switch still needs physical removal, installation and restart testing. An external network, macOS 14–26 hosts, an Intel host and a FileVault-enabled host were not verified.
+Hardware check with the 1.0.19 development build on macOS 27.2.1. The host recognized an older helper and showed the reinstall notice. The settings switch removed and reinstalled the helper. After a real restart, a Mac viewer on a separate internet connection reached the host login screen, signed in through macOS Screen Sharing and automatically resumed the regular Final Fusion session. Video and input delivery were observed on the relayed session. The test used the host’s regular login password with FileVault off.
+
+The public build was checked with local tests. macOS 14–26 hosts, Intel hosts and FileVault-enabled hosts have not been checked on physical hardware.
 
 - Build and signing check passed for the public universal Mac app and helper and the Windows viewer. The public app ID and settings folder were checked, and the installer did not treat the private helper as installed.
 - Local simulation passed for self-test, loopback, session, separate transports, fabricated viewer export, and Go tests with and without the race detector. An installer fixture covered setup checks, installation, update detection, failover to the previous helper and removal.
