@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Network
 
 // The built-in Screen Sharing client handles the Mac account credential
@@ -45,7 +46,7 @@ final class MacLoginWindow {
 
     init(remote: NWConnection) { self.remote = remote }
 
-    func start(greeting: Data) {
+    func start(greeting: Data, key: P256.Signing.PrivateKey) {
         let timeout = DispatchWorkItem { [weak self] in
             self?.finish(handoff: false, L("Mac 로그인 화면을 열지 못했어요.", "Couldn't open the Mac login screen."))
         }
@@ -55,24 +56,44 @@ final class MacLoginWindow {
         var header = Data([Kind.hello.rawValue])
         header.put(UInt32(0))
         header.put(UInt32(49))
-        header.append(greeting.prefix(48))
-        header.append(0)
+        let hello = Data(greeting.prefix(48)) + Data([0])
+        header.append(hello)
         remote.send(content: header, completion: .contentProcessed { [weak self] error in
             guard let self, !self.finished else { return }
             if let error { self.finish(handoff: false, error.localizedDescription); return }
-            self.read(1) { [weak self] reply in
-                guard let self else { return }
-                switch reply.first {
-                case 1: self.readAccount()
-                case 0:
-                    self.finish(handoff: false, L("로그인 전에 연결하려면 보내는 맥에 로그인해 이 기기를 먼저 허용하세요.",
-                                                  "Sign in to the host Mac and approve this device before connecting at startup."))
-                default:
-                    self.finish(handoff: false, L("보내는 맥의 기본 화면 공유에 연결하지 못했어요. 보내는 맥에서 화면 공유가 켜져 있는지 확인하세요.",
-                                                  "Couldn't connect to the host Mac's built-in Screen Sharing. Make sure Screen Sharing is on there."))
+            self.read(41) { [weak self] challenge in
+                guard let self, challenge.first == Kind.deviceChallenge.rawValue,
+                      challenge.number(at: 1) == 0, challenge.number(at: 5) == 32,
+                      let proof = deviceSignature(key, nonce: Data(challenge.suffix(32)), greeting: hello) else {
+                    self?.finish(handoff: false, L("기기를 확인하지 못했어요.", "Couldn't verify the device."))
+                    return
                 }
+                var frame = Data([Kind.deviceProof.rawValue])
+                frame.put(UInt32(0))
+                frame.put(UInt32(proof.count))
+                frame.append(proof)
+                self.remote.send(content: frame, completion: .contentProcessed { [weak self] error in
+                    guard let self, !self.finished else { return }
+                    if let error { self.finish(handoff: false, error.localizedDescription); return }
+                    self.readApproval()
+                })
             }
         })
+    }
+
+    private func readApproval() {
+        read(1) { [weak self] reply in
+            guard let self else { return }
+            switch reply.first {
+            case 1: self.readAccount()
+            case 0:
+                self.finish(handoff: false, L("로그인 전에 연결하려면 보내는 맥에 로그인해 이 기기를 먼저 허용하세요.",
+                                              "Sign in to the host Mac and approve this device before connecting at startup."))
+            default:
+                self.finish(handoff: false, L("보내는 맥의 기본 화면 공유에 연결하지 못했어요. 보내는 맥에서 화면 공유가 켜져 있는지 확인하세요.",
+                                              "Couldn't connect to the host Mac's built-in Screen Sharing. Make sure Screen Sharing is on there."))
+            }
+        }
     }
 
     func stop() {
@@ -134,10 +155,14 @@ final class MacLoginWindow {
                 default: break
                 }
             }
-            listener.newConnectionHandler = { [weak self] connection in
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
                 guard let self, !self.finished, self.streams.count < Self.streamLimit,
-                      case let .hostPort(.ipv4(ip), _) = connection.endpoint,
-                      ip == IPv4Address("127.0.0.1") else { connection.cancel(); return }
+                      case let .hostPort(.ipv4(ip), clientPort) = connection.endpoint,
+                      ip == IPv4Address("127.0.0.1"), let serverPort = listener?.port,
+                      NSRunningApplication.runningApplications(withBundleIdentifier: Self.screenSharingID).contains(where: {
+                          !$0.isTerminated && StudioIsScreenSharingPeer($0.processIdentifier, clientPort.rawValue,
+                                                                      serverPort.rawValue)
+                      }) else { connection.cancel(); return }
                 self.accept(connection)
             }
             listener.start(queue: .main)

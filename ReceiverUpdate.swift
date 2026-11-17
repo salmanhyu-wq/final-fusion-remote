@@ -126,6 +126,10 @@ struct ReceiverUpdateInstall {
         let parent = application.deletingLastPathComponent()
         let allowed = [URL(fileURLWithPath: "/Applications", isDirectory: true),
                        fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)]
+        guard let publisher = installedPublisher(application) else {
+            throw StudioError.message(L("자동 업데이트를 받으려면 고정 서명으로 만든 받는 앱을 먼저 설치해 주세요.",
+                                        "Install a receiver with a fixed signing identity to enable automatic updates."))
+        }
         guard let current = ReceiverUpdateVersion.current, offer.isNewer(than: current),
               let size = try image.resourceValues(forKeys: [.fileSizeKey]).fileSize, size == offer.size,
               offer.matches(try Data(contentsOf: image)) else {
@@ -160,7 +164,7 @@ struct ReceiverUpdateInstall {
         }
 
         try run("/usr/bin/codesign", ["--verify", "--strict", "--deep", candidate.path])
-        guard matchesInstalledSignature(candidate, installed: application) else {
+        guard matchesPublisher(candidate, publisher) else {
             throw StudioError.message(L("설치된 앱과 업데이트의 서명이 달라요.",
                                         "The update signature doesn't match the installed viewer."))
         }
@@ -176,6 +180,9 @@ struct ReceiverUpdateInstall {
             do { try fm.copyItem(at: candidate, to: replacement) }
             catch { throw ReceiverUpdateInstallError.openInstaller }
             try run("/usr/bin/codesign", ["--verify", "--strict", "--deep", replacement.path])
+            guard matchesPublisher(replacement, publisher) else {
+                throw StudioError.message(L("업데이트 파일의 서명이 달라요.", "The staged update signature does not match."))
+            }
             if bundle.object(forInfoDictionaryKey: "StudioReceiverStartupCheck") as? Bool == true {
                 guard let executable = Bundle(url: replacement)?.executableURL,
                       fm.isExecutableFile(atPath: executable.path) else {
@@ -194,22 +201,25 @@ struct ReceiverUpdateInstall {
         }
     }
 
-    private static func matchesInstalledSignature(_ candidate: URL, installed: URL) -> Bool {
+    private static func installedPublisher(_ installed: URL) -> SecRequirement? {
         let flags = SecCSFlags(rawValue: 0)
         var installedCode: SecStaticCode?
         var info: CFDictionary?
         guard SecStaticCodeCreateWithPath(installed as CFURL, flags, &installedCode) == errSecSuccess,
               let installedCode,
               SecCodeCopySigningInformation(installedCode, SecCSFlags(rawValue: UInt32(kSecCSSigningInformation)), &info) == errSecSuccess,
-              let signingInfo = info as? [String: Any] else { return false }
-        // Ad-hoc builds rely on the pinned host and verified update profile.
-        guard let certificates = signingInfo[kSecCodeInfoCertificates as String] as? [SecCertificate],
-              !certificates.isEmpty else { return true }
+              let signingInfo = info as? [String: Any],
+              let certificates = signingInfo[kSecCodeInfoCertificates as String] as? [SecCertificate],
+              !certificates.isEmpty else { return nil }
         var requirement: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(installedCode, flags, &requirement) == errSecSuccess else { return nil }
+        return requirement
+    }
+
+    private static func matchesPublisher(_ candidate: URL, _ requirement: SecRequirement) -> Bool {
+        let flags = SecCSFlags(rawValue: 0)
         var candidateCode: SecStaticCode?
-        return SecCodeCopyDesignatedRequirement(installedCode, flags, &requirement) == errSecSuccess &&
-            requirement != nil &&
-            SecStaticCodeCreateWithPath(candidate as CFURL, flags, &candidateCode) == errSecSuccess &&
+        return SecStaticCodeCreateWithPath(candidate as CFURL, flags, &candidateCode) == errSecSuccess &&
             candidateCode.map { SecStaticCodeCheckValidity($0, flags, requirement) == errSecSuccess } == true
     }
 

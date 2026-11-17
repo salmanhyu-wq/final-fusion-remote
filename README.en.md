@@ -1,4 +1,4 @@
-# Final Fusion 1.0.19
+# Final Fusion 1.0.20
 
 **I built this for myself.**
 
@@ -6,7 +6,9 @@ The picture quality in Chrome Remote Desktop hurt my eyes, my old MacBook was no
 
 I wish you all the best in whatever you do.
 
-**[Download the Mac installer · 1.0.4](https://github.com/salmanhyu-wq/final-fusion-remote/releases/download/v1.0.4/Final-Fusion-1.0.4-macOS.dmg)** · macOS 14 or later
+**[Build 1.0.20](DEVELOPMENT.md)** · The host requires macOS 14 or later.
+
+This version requires a [relay update](Relay/SETUP.md) and fresh approval for each viewer. Upgrade viewers or prepare new installers before cutting over the relay.
 
 **Use a headless Mac mini or Mac Studio from an older laptop, like it was your Mac.** Work with a sharp remote display and familiar Mac shortcuts. If setup or troubleshooting gets stuck, copy the app’s guide into your own AI assistant.
 

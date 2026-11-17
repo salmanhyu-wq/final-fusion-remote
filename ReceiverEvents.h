@@ -1,4 +1,7 @@
 #include <CoreGraphics/CoreGraphics.h>
+#include <sys/types.h>
+
+bool StudioIsScreenSharingPeer(pid_t pid, uint16_t clientPort, uint16_t serverPort);
 
 static inline CFDataRef _Nullable StudioCopyEventData(CGEventRef _Nonnull event) CF_RETURNS_RETAINED {
     return CGEventCreateData(NULL, event);

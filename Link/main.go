@@ -55,12 +55,13 @@ func randomBytes(size int) []byte {
 }
 
 type hostState struct {
-	Cert       []byte          `json:"cert"`
-	Key        []byte          `json:"key"`
-	MacCert    []byte          `json:"macCert,omitempty"`
-	MacKey     []byte          `json:"macKey,omitempty"`
-	Invitation string          `json:"invitation"`
-	Trusted    map[string]bool `json:"trusted"`
+	Cert        []byte          `json:"cert"`
+	Key         []byte          `json:"key"`
+	MacCert     []byte          `json:"macCert,omitempty"`
+	MacKey      []byte          `json:"macKey,omitempty"`
+	Invitation  string          `json:"invitation"`
+	Trusted     map[string]bool `json:"trusted"`
+	TrustedKeys map[string]bool `json:"trustedKeys,omitempty"`
 }
 
 func saveJSON(path string, value any) error {
@@ -162,9 +163,13 @@ type gateway struct {
 	pending   *approval
 	sink      string
 	directTLS *tls.Config
+	publish   func([]string) error
+	output    sync.Mutex
 }
 
 func (g *gateway) emit(v any) {
+	g.output.Lock()
+	defer g.output.Unlock()
 	_ = json.NewEncoder(g.out).Encode(v)
 }
 
@@ -190,14 +195,23 @@ func deviceTokenID(token []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (g *gateway) allowed(conn net.Conn, token []byte) bool {
-	id := deviceTokenID(token)
-	g.lock.Lock()
-	if g.state.Trusted[id] {
-		g.lock.Unlock()
-		return true
+func (g *gateway) enrolledKeys() []string {
+	keys := make([]string, 0, len(g.state.TrustedKeys))
+	for key, allowed := range g.state.TrustedKeys {
+		if allowed {
+			keys = append(keys, key)
+		}
 	}
-	if g.pending != nil {
+	return keys
+}
+
+func (g *gateway) allowEnrollment(conn net.Conn, id string) bool {
+	g.lock.Lock()
+	if g.state.TrustedKeys[id] {
+		defer g.lock.Unlock()
+		return g.publish(g.enrolledKeys()) == nil
+	}
+	if g.pending != nil || len(g.state.TrustedKeys) >= maxDeviceKeys {
 		g.lock.Unlock()
 		_ = writeFrame(conn, 7, []byte(tr("다른 기기의 허용 요청을 처리 중이에요. 잠시 뒤 다시 연결하세요.", "Another device is waiting for approval. Connect again in a moment.")))
 		return false
@@ -228,18 +242,22 @@ func (g *gateway) allowed(conn net.Conn, token []byte) bool {
 	defer g.lock.Unlock()
 	g.pending = nil
 	if accepted {
-		g.state.Trusted[id] = true
-		if err := saveJSON(g.path, g.state); err == nil {
+		if g.state.TrustedKeys == nil {
+			g.state.TrustedKeys = make(map[string]bool)
+		}
+		g.state.TrustedKeys[id] = true
+		if err := saveJSON(g.path, g.state); err == nil && g.publish(g.enrolledKeys()) == nil {
 			return true
 		}
-		delete(g.state.Trusted, id)
+		delete(g.state.TrustedKeys, id)
+		_ = saveJSON(g.path, g.state)
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
 	_ = writeFrame(conn, 7, []byte(tr("보내는 맥에서 이 기기를 허용하지 않았어요.", "The host Mac didn't allow this device.")))
 	return false
 }
 
-func (g *gateway) handle(conn net.Conn) {
+func (g *gateway) handle(conn net.Conn, enrollment bool) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
 	body, err := readHello(conn)
@@ -247,9 +265,27 @@ func (g *gateway) handle(conn net.Conn) {
 	if err != nil || subtle.ConstantTimeCompare(id, body[:16]) != 1 {
 		return
 	}
-	if !g.allowed(conn, body[16:48]) {
+	identity, proved := peerDevice(conn, body)
+	if !proved {
 		return
 	}
+	if enrollment {
+		if g.allowEnrollment(conn, identity) {
+			_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+			_ = writeFrame(conn, deviceAdmitted, nil)
+		}
+		return
+	}
+	g.lock.Lock()
+	approved := g.state.TrustedKeys[identity]
+	g.lock.Unlock()
+	if !approved {
+		return
+	}
+	g.forwardViewer(conn, body)
+}
+
+func (g *gateway) forwardViewer(conn net.Conn, body []byte) {
 	if body[48]&directGreeting != 0 {
 		body[48] &^= directGreeting
 		if g.directTLS != nil {

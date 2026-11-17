@@ -128,6 +128,9 @@ async function connect(retries = 0) {
         const code = utf8.decode(bytes);
         if (!/^\d{6}$/.test(code)) throw Error(T("6자리 번호를 읽지 못했어요.", "Couldn't read the 6-digit code."));
         status(T("6자리 번호 " + code + " · 보내는 맥의 ‘③ 첫 연결’ 칸에 이 번호를 입력하고 ‘허용’을 누르세요.", "6-digit code " + code + " · Enter it under “③ First connection” on the host Mac and click “Allow”."), "attention");
+      } else if (kind === 21 && !playing && bytes.length === 0) {
+        reconnectAfter(stop(T("기기를 허용했어요. 다시 연결해요.", "Device approved. Reconnecting."), "busy"), 2);
+        break;
       } else if (kind === 6) {
         if (bytes.length === 8) {
           const rtt = Date.now() - Number(new DataView(bytes.buffer).getBigUint64(0));
@@ -234,9 +237,11 @@ async function startSound(display) {
   } catch (_) { stopSound(); }
 }
 function playSound(bytes) {
-  if (!sound || !bytes.length) return;
+  if (!sound || !bytes.length || bytes.length > 8192) return;
+  const timestamp = sound.count++ * 20000;
+  if (sound.decoder.decodeQueueSize >= 12) return;
   try {
-    sound.decoder.decode(new EncodedAudioChunk({type: "key", timestamp: sound.count++ * 20000, data: bytes}));
+    sound.decoder.decode(new EncodedAudioChunk({type: "key", timestamp, data: bytes}));
   } catch (_) { stopSound(); }
 }
 function stopSound() {

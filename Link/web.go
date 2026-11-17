@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/sha256"
 	"embed"
 	"encoding/binary"
 	"encoding/hex"
@@ -31,7 +33,7 @@ type browserSession struct {
 }
 type browserViewer struct {
 	profile        profile
-	token          []byte
+	key            *ecdsa.PrivateKey
 	prefix, origin string
 	mux            *http.ServeMux
 	lock           sync.Mutex
@@ -58,7 +60,7 @@ func runWindows() error {
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	token, err := deviceToken(filepath.Join(dir, "device.key"))
+	key, err := receiverKey(dir, profile)
 	if err != nil {
 		return err
 	}
@@ -67,7 +69,7 @@ func runWindows() error {
 		return err
 	}
 	defer socket.Close()
-	viewer := &browserViewer{profile: profile, token: token, origin: "http://" + socket.Addr().String(),
+	viewer := &browserViewer{profile: profile, key: key, origin: "http://" + socket.Addr().String(),
 		prefix: "/" + hex.EncodeToString(randomBytes(24)), last: time.Now()}
 	server := &http.Server{Handler: viewer.handler(), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
 	viewer.stop = func() { _ = server.Close() }
@@ -234,19 +236,23 @@ func (v *browserViewer) connect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	conn, err := connectTLS(v.profile)
+	conn, err := connectTLS(r.Context(), v.profile, v.key)
 	if err != nil {
 		http.Error(w, tr("연결할 수 없어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "Couldn't connect. Check your internet and make sure the host Mac is sharing."), 502)
 		return
 	}
-	_ = conn.SetWriteDeadline(time.Now().Add(4 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(6 * time.Second))
 	id, _ := hex.DecodeString(v.profile.Invitation)
 	quality := byte(0)
 	if large || query.Get("quality") == "retina" {
 		quality = 1
 	}
-	hello := append(append(append(id, v.token...), quality), options...)
-	if err = writeFrame(conn, 1, hello); err != nil {
+	deviceID := sha256.Sum256(devicePublic(v.key))
+	hello := append(append(append(id, deviceID[:]...), quality), options...)
+	if err = writeFrame(conn, 1, hello); err == nil {
+		err = answerDevice(conn, v.key, hello)
+	}
+	if err != nil {
 		_ = conn.Close()
 		http.Error(w, tr("연결 요청을 보낼 수 없어요.", "Couldn't send the connection request."), 502)
 		return
@@ -255,6 +261,7 @@ func (v *browserViewer) connect(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
+	_ = conn.SetDeadline(time.Time{})
 	v.lock.Lock()
 	v.peer = &browserSession{conn: conn}
 	v.lock.Unlock()

@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Network
 import Security
 
@@ -56,6 +57,7 @@ enum LocalSetup {
     static let home = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent(directory, isDirectory: true)
     private static var config: URL { home.appendingPathComponent("relay.json") }
+    private static var sharingState: URL { home.appendingPathComponent("sharing-state.txt") }
     static let reportURL = home.appendingPathComponent("receiver-diagnostics.json")
     private static let directURL = home.appendingPathComponent("direct.txt")
     private static let streamModeURL = home.appendingPathComponent("stream-mode.txt")
@@ -118,6 +120,17 @@ enum LocalSetup {
                                                 attributes: [.posixPermissions: 0o700])
     }
 
+    static func sharingEnabled() -> Bool {
+        do { return try Data(contentsOf: sharingState) == Data("on".utf8) }
+        catch CocoaError.fileReadNoSuchFile { return true }
+        catch { return false }
+    }
+
+    static func saveSharing(enabled: Bool) throws {
+        try prepare()
+        try Data((enabled ? "on" : "off").utf8).write(to: sharingState, options: .atomic)
+    }
+
     static func load() -> RelaySetup? {
         guard let data = try? Data(contentsOf: config),
               let setup = try? JSONDecoder().decode(RelaySetup.self, from: data), setup.valid else { return nil }
@@ -130,24 +143,46 @@ enum LocalSetup {
         try JSONEncoder().encode(setup).write(to: config, options: .atomic)
     }
 
-    static func deviceToken() throws -> Data {
+    static func receiverSigningKey(_ profile: ReceiverProfile) throws -> P256.Signing.PrivateKey {
+        guard let host = URLComponents(string: profile.relay)?.host else {
+            throw StudioError.message(L("연결 서버 주소를 확인하세요.", "Check the connection server address."))
+        }
+        let scope = Data([host, profile.room, profile.pin, profile.macPin ?? ""].joined(separator: ":").lowercased().utf8)
         try prepare()
-        let url = home.appendingPathComponent("device.key")
-        if FileManager.default.fileExists(atPath: url.path) {
-            let data = try Data(contentsOf: url)
-            guard data.count == 32 else { throw StudioError.message(L("저장된 기기 정보를 읽을 수 없어요.", "Couldn't read the saved device info.")) }
-            return data
+        let url = home.appendingPathComponent("device-v2-" + hex(Data(SHA256.hash(data: scope))) + ".key")
+        let key = P256.Signing.PrivateKey()
+        let fd = url.withUnsafeFileSystemRepresentation { path in
+            path.map { open($0, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) } ?? -1
         }
-        var bytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            throw StudioError.message(L("기기 정보를 만들 수 없어요.", "Couldn't create the device info."))
+        if fd >= 0 {
+            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            do {
+                try file.write(contentsOf: key.rawRepresentation)
+                try file.close()
+                return key
+            } catch {
+                try? file.close()
+                try? FileManager.default.removeItem(at: url)
+                throw error
+            }
         }
-        let data = Data(bytes)
-        guard FileManager.default.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
-            throw StudioError.message(L("기기 정보를 저장할 수 없어요.", "Couldn't save the device info."))
-        }
-        return data
+        return try P256.Signing.PrivateKey(rawRepresentation: Data(contentsOf: url))
     }
+}
+
+func deviceSignature(_ key: P256.Signing.PrivateKey, nonce: Data, greeting: Data) -> Data? {
+    guard nonce.count == 32,
+          let signature = try? key.signature(for: Data("final-fusion-device-v2".utf8) + nonce + greeting) else { return nil }
+    return key.publicKey.x963Representation + signature.rawRepresentation
+}
+
+func relayAuthorization(room: String, method: String, key: P256.Signing.PrivateKey) throws -> String {
+    let stamp = String(Int64(Date().timeIntervalSince1970))
+    let nonce = hex(try makeCode())
+    let payload = ["final-fusion-relay-v2", method, room, stamp, nonce].joined(separator: ":")
+    let signature = try key.signature(for: Data(payload.utf8))
+    return ["FF2", hex(key.publicKey.x963Representation), stamp, nonce, hex(signature.rawRepresentation)]
+        .joined(separator: " ")
 }
 
 func secureConnection(_ profile: ReceiverProfile, host: NWEndpoint.Host = "127.0.0.1",

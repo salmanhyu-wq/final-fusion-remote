@@ -2,6 +2,8 @@
 
 The host is a native macOS app. The Mac viewer is built with the host; the Go helper also builds the Windows viewer. The host creates a paired viewer for each user's own setup. This repo has no preconfigured relay or personal receiver file.
 
+1.0.20 uses a new relay protocol. Prepare the signed viewer update or a separate installation package before switching the relay. Approve each viewer again after the switch. Reinstall the boot helper after pairing if you use login-window access. A fixed signing identity is required for automatic Mac viewer updates.
+
 ## Build
 
 On a Mac, install the Xcode Command Line Tools, a macOS SDK with ScreenCaptureKit, and Go as specified in `Link/go.mod`. Install the Windows resource tool with `go install github.com/tc-hib/go-winres@v0.3.3`. Then:

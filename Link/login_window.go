@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/binary"
@@ -11,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -22,14 +20,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
 // Version 2 carries several Screen Sharing connections over one approved link.
 // The built-in Screen Sharing app closes its first connection when the account
 // password is submitted and signs in on a new one.
-const loginWindowProtocol = "studio-mac-login-2"
+const loginWindowProtocol = "studio-mac-login-3"
 
 const (
 	loginStreamOpen  byte = 1
@@ -49,23 +45,21 @@ func runLoginWindowHost(dir string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	for ctx.Err() == nil {
-		if loginWindowActive() {
+		if loginWindowActive() && sharingEnabled(dir) {
 			trace := &loginWindowTrace{}
 			trace.file, _ = os.OpenFile(filepath.Join(dir, "login-window.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 			trace.write("detected the macOS login window")
 			loginCtx, cancel := context.WithCancel(ctx)
 			go func() {
 				defer cancel()
-				for loginWindowActive() && relayPause(loginCtx, time.Second) {
+				for loginWindowActive() && sharingEnabled(dir) && relayPause(loginCtx, time.Second) {
 				}
 			}()
 			if err := serveLoginWindow(loginCtx, dir, trace); err != nil {
 				trace.write(err.Error())
 			}
 			trace.write("leaving the macOS login window")
-			if trace.file != nil {
-				_ = trace.file.Close()
-			}
+			trace.close()
 			cancel()
 		}
 		relayPause(ctx, 2*time.Second)
@@ -73,18 +67,40 @@ func runLoginWindowHost(dir string) error {
 	return nil
 }
 
-type loginWindowTrace struct {
-	file *os.File
-	last string
+func sharingEnabled(dir string) bool {
+	state, err := os.ReadFile(filepath.Join(dir, "sharing-state.txt"))
+	return os.IsNotExist(err) || (err == nil && string(state) == "on")
 }
 
+type loginWindowTrace struct {
+	lock    sync.Mutex
+	file    *os.File
+	last    string
+	written int
+}
+
+const loginLogLimit = 256 * 1024
+
 func (trace *loginWindowTrace) write(message string) {
-	if trace.last == message {
+	trace.lock.Lock()
+	defer trace.lock.Unlock()
+	if trace.last == message || trace.file == nil {
 		return
 	}
-	trace.last = message
+	line := time.Now().Format("2006/01/02 15:04:05.000000") + " " + message + "\n"
+	if len(line) <= loginLogLimit-trace.written {
+		trace.last = message
+		count, _ := trace.file.WriteString(line)
+		trace.written += count
+	}
+}
+
+func (trace *loginWindowTrace) close() {
+	trace.lock.Lock()
+	defer trace.lock.Unlock()
 	if trace.file != nil {
-		log.New(trace.file, "", log.LstdFlags|log.Lmicroseconds).Print(message)
+		_ = trace.file.Close()
+		trace.file = nil
 	}
 }
 
@@ -112,13 +128,13 @@ func serveLoginWindow(ctx context.Context, dir string, trace *loginWindowTrace) 
 	config.NextProtos = []string{loginWindowProtocol}
 	invitation, _ := hex.DecodeString(state.Invitation)
 	account := hostAccountName(ctx)
-	header := http.Header{"Authorization": {"Bearer " + hex.EncodeToString(key)}}
-	room := sha256.Sum256(key)
+	auth := "Bearer " + hex.EncodeToString(key)
+	header := http.Header{"Authorization": {auth}}
 	checkedSlot := false
 	report := trace.write
 	for ctx.Err() == nil {
 		dial, cancelDial := context.WithTimeout(ctx, 8*time.Second)
-		socket, err := dialRelay(dial, setup.Relay, "/v1/sender", header)
+		socket, err := dialRelay(dial, setup.Relay, "/v2/sender", header)
 		cancelDial()
 		if err == nil {
 			report("ready on the relay")
@@ -128,7 +144,7 @@ func serveLoginWindow(ctx context.Context, dir string, trace *loginWindowTrace) 
 				_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
 				if conn.HandshakeContext(ctx) == nil && conn.ConnectionState().NegotiatedProtocol == loginWindowProtocol {
 					report("viewer negotiated login window transport")
-					bridgeLoginWindow(stream, conn, invitation, state.Trusted, loginBackend{
+					bridgeLoginWindow(stream, conn, invitation, state.TrustedKeys, loginBackend{
 						account: account,
 						ready:   systemScreenSharingReady,
 						dial:    dialSystemScreenSharing,
@@ -141,7 +157,7 @@ func serveLoginWindow(ctx context.Context, dir string, trace *loginWindowTrace) 
 			report("relay sender slot is busy")
 			if !checkedSlot && loginWindowActive() {
 				checkedSlot = true
-				if releaseIdleRelaySender(ctx, setup.Relay, hex.EncodeToString(room[:])) {
+				if releaseIdleRelaySender(ctx, setup.Relay, auth) {
 					report("relay released the previous idle sender")
 				}
 			}
@@ -153,26 +169,14 @@ func serveLoginWindow(ctx context.Context, dir string, trace *loginWindowTrace) 
 	return nil
 }
 
-func releaseIdleRelaySender(ctx context.Context, origin, room string) bool {
-	// V1 refuses this receiver connection if a viewer already owns the session.
-	// An accepted pairing means a previous sender is holding an idle slot.
+func releaseIdleRelaySender(ctx context.Context, origin, authorization string) bool {
+	if !loginWindowActive() {
+		return false
+	}
 	check, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	socket, err := dialRelay(check, origin, "/v1/receiver/"+room, nil)
-	if err != nil {
-		return false
-	}
-	defer socket.CloseNow()
-	if !loginWindowActive() {
-		_ = socket.Close(websocket.StatusNormalClosure, "")
-		return false
-	}
-	// The V1 worker acknowledges a text message by closing both sockets.
-	if socket.Write(check, websocket.MessageText, []byte("release idle sender")) == nil {
-		_, _, err = socket.Read(check)
-		return websocket.CloseStatus(err) == websocket.StatusPolicyViolation
-	}
-	return false
+	status, err := relayControl(check, origin, http.MethodPost, "/v2/release", authorization, nil)
+	return err == nil && status == http.StatusNoContent
 }
 
 func systemScreenSharingReady(ctx context.Context) bool {
@@ -221,7 +225,8 @@ func bridgeLoginWindow(ctx context.Context, conn net.Conn, invitation []byte, tr
 	if err != nil || len(body) != 49 || body[48] != 0 || subtle.ConstantTimeCompare(invitation, body[:16]) != 1 {
 		return
 	}
-	if !trusted[deviceTokenID(body[16:48])] {
+	identity, proved := peerDevice(conn, body)
+	if !proved || !trusted[identity] {
 		_, _ = conn.Write([]byte{0})
 		return
 	}

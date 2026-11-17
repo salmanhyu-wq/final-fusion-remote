@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -27,13 +31,14 @@ func TestLocalWorkerCarriesPinnedTLS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	secret := bytes.Repeat([]byte{19}, 32)
-	room := sha256.Sum256(secret)
-	viewerPath := "/v1/receiver/" + hex.EncodeToString(room[:])
+	roomHash := sha256.Sum256(secret)
+	room := hex.EncodeToString(roomHash[:])
+	viewerPath := "/v2/receiver/" + room
 	reject := func(path, token string, status int) {
 		t.Helper()
 		header := http.Header{}
 		if token != "" {
-			header.Set("Authorization", "Bearer "+token)
+			header.Set("Authorization", token)
 		}
 		socket, response, err := websocket.Dial(ctx, base+path, &websocket.DialOptions{HTTPHeader: header})
 		if socket != nil {
@@ -43,15 +48,43 @@ func TestLocalWorkerCarriesPinnedTLS(t *testing.T) {
 			t.Fatalf("expected HTTP %d for %s, got %v, %v", status, path, response, err)
 		}
 	}
-	reject(viewerPath, "", http.StatusServiceUnavailable)
-	reject("/v1/sender", hex.EncodeToString(make([]byte, 32)), http.StatusNotFound)
-	header := http.Header{"Authorization": {"Bearer " + hex.EncodeToString(secret)}}
-	sender, _, err := websocket.Dial(ctx, base+"/v1/sender", &websocket.DialOptions{HTTPHeader: header})
+	reject("/v1/receiver/"+room, "", http.StatusNotFound)
+	reject(viewerPath, "", http.StatusForbidden)
+	reject("/v2/sender", "Bearer "+hex.EncodeToString(make([]byte, 32)), http.StatusNotFound)
+	auth := "Bearer " + hex.EncodeToString(secret)
+	header := http.Header{"Authorization": {auth}}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"devices":    []string{hex.EncodeToString(devicePublic(key))},
+		"enrollment": strings.Repeat("11", 32),
+	})
+	origin := "http" + strings.TrimPrefix(base, "ws")
+	control, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/v2/authorize", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.Header.Set("Authorization", auth)
+	reply, err := http.DefaultClient.Do(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reply.Body.Close()
+	if reply.StatusCode != http.StatusNoContent {
+		t.Fatalf("authorize status: %d", reply.StatusCode)
+	}
+	sender, _, err := websocket.Dial(ctx, base+"/v2/sender", &websocket.DialOptions{HTTPHeader: header})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sender.CloseNow()
-	receiver, _, err := websocket.Dial(ctx, base+viewerPath, nil)
+	proof, err := receiverAuthorization(room, http.MethodGet, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver, _, err := websocket.Dial(ctx, base+viewerPath, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {proof}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +93,7 @@ func TestLocalWorkerCarriesPinnedTLS(t *testing.T) {
 	if err != nil || kind != websocket.MessageText || string(ready) != "paired" {
 		t.Fatalf("sender was not paired: %s, %v", ready, err)
 	}
-	reject(viewerPath, "", http.StatusConflict)
+	reject(viewerPath, "", http.StatusForbidden)
 
 	state, err := loadHostState(filepath.Join(t.TempDir(), "host.json"))
 	if err != nil {

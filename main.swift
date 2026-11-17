@@ -179,7 +179,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             if self.receiverOnly {
                 if ViewerLocation.needsMove && self.offerMoveToApplications() { return }
                 self.finishViewerLaunch(renameBy: .now() + 4)
-            } else if LocalSetup.load() != nil {
+            } else if LocalSetup.load() != nil && LocalSetup.sharingEnabled() {
                 self.wantsHosting = true
                 self.startSending(requestPermissions: false)
             }
@@ -403,7 +403,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         viewing?.stop()
-        stopHosting()
+        hostRetry?.cancel()
+        closeSending()
     }
 
     @objc private func saveReceiverOptions() {
@@ -1256,6 +1257,8 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func beginHosting() {
+        do { try LocalSetup.saveSharing(enabled: true) }
+        catch { hostStatus.stringValue = error.localizedDescription; return }
         wantsHosting = true
         hostRetry?.cancel()
         hostRetry = nil
@@ -1455,7 +1458,13 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         hostRetry?.cancel()
         hostRetry = nil
         closeSending()
-        hostStatus.stringValue = L("보내기가 꺼져 있어요.", "Sharing is off.")
+        do {
+            try LocalSetup.saveSharing(enabled: false)
+            hostStatus.stringValue = L("보내기가 꺼져 있어요.", "Sharing is off.")
+        } catch {
+            hostStatus.stringValue = L("송신을 멈췄지만 다음 실행을 위한 중지 설정을 저장하지 못했어요.",
+                                       "Sharing stopped, but the stop setting could not be saved for the next launch.")
+        }
     }
 
     private func closeSending() {

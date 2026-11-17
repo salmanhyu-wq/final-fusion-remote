@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import AVFoundation
 import Carbon.HIToolbox
 import Network
@@ -37,6 +38,8 @@ final class StudioViewer {
     private var loginReconnect: DispatchWorkItem?
     private var loginReconnectUntil: Date?
     private var relaySession: (profile: ReceiverProfile, greeting: Data, pixels: ReceiverNativePixels?)?
+    private var deviceKey: P256.Signing.PrivateKey?
+    private var deviceGreeting: Data?
     private var profile: ReceiverProfile?
     private var directTrials: [Wire] = []
     private var directTimeout: DispatchWorkItem?
@@ -87,11 +90,12 @@ final class StudioViewer {
     }
 
     func start(profile: ReceiverProfile) throws {
-        let token = try LocalSetup.deviceToken()
+        let key = try LocalSetup.receiverSigningKey(profile)
+        deviceKey = key
         guard var greeting = strictHex(profile.invitation, count: 16) else {
             throw StudioError.message(L("받는 앱을 다시 만들어 주세요.", "Please create the viewer app again."))
         }
-        greeting.append(token)
+        greeting.append(Data(SHA256.hash(data: key.publicKey.x963Representation)))
         let screen = NSScreen.screens.first ?? NSScreen.main
         let options = (profile.interactionV1 == true && receiverMode != nil) ? screen.flatMap {
             resolution.displayOptions(width: Int($0.frame.width.rounded()), height: Int($0.frame.height.rounded()))
@@ -193,11 +197,11 @@ final class StudioViewer {
     }
 
     private func connectRelay() throws {
-        guard let session = relaySession else { return }
+        guard let session = relaySession, let key = deviceKey else { return }
         let tunnel = RelayTunnel()
         self.tunnel = tunnel
         lastSeen = Date()
-        try tunnel.start(session.profile, onEndpoint: { [weak self, weak tunnel] port in
+        try tunnel.start(session.profile, key: key, onEndpoint: { [weak self, weak tunnel] port in
             guard let self, let tunnel, self.tunnel === tunnel else { return }
             do {
                 let connection = try secureConnection(session.profile, port: port, allowLoginWindow: self.onUpdateVersion == nil)
@@ -223,6 +227,7 @@ final class StudioViewer {
     }
 
     private func openLoginWindow(_ connection: NWConnection, greeting: Data) {
+        guard let deviceKey else { connection.cancel(); return }
         if loginReconnectUntil != nil {
             connection.cancel()
             relayFailed(L("Mac 로그인을 마친 뒤 다시 연결해 주세요.", "Finish signing in to the Mac, then connect again."))
@@ -244,7 +249,7 @@ final class StudioViewer {
                 self.relayFailed(L("Mac 로그인을 마친 뒤 다시 연결해 주세요.", "Finish signing in to the Mac, then connect again."))
             } else { self.stop(reason) }
         }
-        login.start(greeting: greeting)
+        login.start(greeting: greeting, key: deviceKey)
     }
 
     private func relayFailed(_ reason: String) {
@@ -271,7 +276,7 @@ final class StudioViewer {
         self.profile = profile
         diagnosticSession = UUID()
         let tryDirect = receiverMode != nil && onUpdateVersion == nil
-        wire.onReady = { [weak wire] in
+        wire.onReady = { [weak self, weak wire] in
             guard let wire = wire else { return }
             var hello = greeting
             if tryDirect && hello.count > 48 && wire.supportsDirect {
@@ -280,6 +285,7 @@ final class StudioViewer {
                     hello.append(nativePixels.bytes)
                 }
             }
+            if self?.deviceKey != nil { self?.deviceGreeting = hello }
             wire.send(.hello, data: hello)
         }
         bind(wire)
@@ -372,6 +378,8 @@ final class StudioViewer {
         loginWindow?.stop()
         loginWindow = nil
         relaySession = nil
+        deviceKey = nil
+        deviceGreeting = nil
         finishDirectTrials()
         handoffRelay?.close()
         handoffRelay = nil
@@ -427,6 +435,25 @@ final class StudioViewer {
     private func receive(_ kind: Kind, _ id: UInt32, _ data: Data) {
         lastSeen = Date()
         switch kind {
+        case .deviceChallenge:
+            guard !sawScreens, id == 0, let deviceKey, let greeting = deviceGreeting,
+                  let proof = deviceSignature(deviceKey, nonce: data, greeting: greeting) else {
+                stop(L("기기를 확인하지 못했어요.", "Couldn't verify the device."))
+                return
+            }
+            deviceGreeting = nil
+            wire?.send(.deviceProof, data: proof)
+        case .deviceAdmitted:
+            guard !sawScreens, id == 0, data.isEmpty, relaySession != nil, deviceGreeting == nil else { return }
+            waitingForApproval = false
+            wire?.onEnd = nil
+            wire?.close()
+            wire = nil
+            tunnel?.close()
+            tunnel = nil
+            status(L("기기를 허용했어요. 다시 연결해요.", "Device approved. Reconnecting."))
+            do { try connectRelay() }
+            catch { stop(error.localizedDescription) }
         case .screens:
             guard onUpdateVersion == nil, !sawScreens, let displays = try? JSONDecoder().decode([DisplayInfo].self, from: data),
                   (1...8).contains(displays.count),

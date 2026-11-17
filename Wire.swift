@@ -4,9 +4,9 @@ import Security
 
 let directProtocol = "studio-direct-1"
 let nativePixelsProtocol = "studio-direct-2"
-let loginWindowProtocol = "studio-mac-login-2"
-// A boot helper installed before 1.0.18. It is only recognised so the viewer can say what to do.
-let legacyLoginWindowProtocol = "studio-mac-login-1"
+let loginWindowProtocol = "studio-mac-login-3"
+// Recognize the previous boot helper so the viewer can ask for reinstalling it.
+let legacyLoginWindowProtocol = "studio-mac-login-2"
 
 enum Kind: UInt8 {
     case hello = 1, screens, format, video, input, keepAlive, failure, pairing, diagnostics, receiverUpdate, videoFeedback, receiverControl
@@ -17,6 +17,7 @@ enum Kind: UInt8 {
     case audio
     /// One step of a clipboard parcel (ParcelPhase), in either direction. Used only after the receiver sent Input.Action.clipboard.
     case parcel
+    case deviceChallenge, deviceProof, deviceAdmitted
 }
 
 struct DisplayInfo: Codable {

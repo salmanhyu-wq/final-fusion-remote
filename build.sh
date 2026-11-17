@@ -60,11 +60,13 @@ for arch in arm64 x86_64; do
   fi
   /usr/bin/xcrun --sdk macosx clang -fobjc-arc -isysroot "$sdk" \
     -target "$arch-apple-macosx11.0" -c VirtualDisplay.m -o "$temp/VirtualDisplay-$arch.o"
+  /usr/bin/xcrun --sdk macosx clang -fobjc-arc -isysroot "$sdk" \
+    -target "$arch-apple-macosx11.0" -c LocalScreenSharingPeer.m -o "$temp/LocalScreenSharingPeer-$arch.o"
   /usr/bin/xcrun --sdk macosx swiftc -swift-version 5 -O -sdk "$sdk" \
     -target "$arch-apple-macosx11.0" -module-cache-path "$out/ModuleCache" "$@" \
     -Xlinker -weak_framework -Xlinker ScreenCaptureKit \
     -module-name StudioRemote -import-objc-header ReceiverEvents.h Localization.swift Design.swift AgentSupport.swift Wire.swift InputBehavior.swift Audio.swift Clipboard.swift TrackpadGestures.swift ReceiverUpdate.swift Host.swift Viewer.swift PointerFeedback.swift ReceiverMode.swift RelayTunnel.swift MacLoginWindow.swift LoginWindowSetup.swift "$temp/EmbeddedLoginWindowInstaller.swift" Pairing.swift SelfTest.swift SessionTest.swift UIPreview.swift main.swift \
-    "$temp/VirtualDisplay-$arch.o" -o "$temp/StudioRemote-$arch"
+    "$temp/VirtualDisplay-$arch.o" "$temp/LocalScreenSharingPeer-$arch.o" -o "$temp/StudioRemote-$arch"
 done
 /usr/bin/lipo -create "$temp/StudioRemote-arm64" "$temp/StudioRemote-x86_64" -output "$app/Contents/MacOS/StudioRemote"
 /bin/cp -- Info.plist "$app/Contents/Info.plist"

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
@@ -94,6 +96,25 @@ func dialRelay(ctx context.Context, origin, path string, headers http.Header) (*
 	return conn, nil
 }
 
+func relayControl(ctx context.Context, origin, method, path, authorization string, body []byte) (int, error) {
+	u, err := relayOrigin(origin)
+	if err != nil {
+		return 0, err
+	}
+	u.Path = path
+	request, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", authorization)
+	response, err := relayHTTP.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	_ = response.Body.Close()
+	return response.StatusCode, nil
+}
+
 func privateHostSocket(path string) bool {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return false
@@ -158,11 +179,55 @@ func serveHost(origin, dir, localSocket string) error {
 			}
 		}
 	}()
-	header := http.Header{"Authorization": {"Bearer " + hex.EncodeToString(key)}}
+	auth := "Bearer " + hex.EncodeToString(key)
+	header := http.Header{"Authorization": {auth}}
+	g.publish = func(keys []string) error {
+		record, _ := json.Marshal(map[string]any{
+			"enrollment": strings.TrimPrefix(enrollmentAuthorization(state.Invitation), "Bearer "),
+			"devices":    keys,
+		})
+		control, cancel := context.WithTimeout(ctx, 6*time.Second)
+		defer cancel()
+		status, err := relayControl(control, origin, http.MethodPost, "/v2/authorize", auth, record)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusNoContent {
+			return errors.New("relay authorization settings were not accepted")
+		}
+		return nil
+	}
+	for ctx.Err() == nil {
+		if err := g.publish(g.enrolledKeys()); err == nil {
+			break
+		}
+		g.emit(map[string]string{"event": "relayRetry", "message": tr("연결 서버를 새 보안 버전으로 업데이트해 주세요.", "Update the relay to the new security protocol.")})
+		if !relayPause(ctx, 5*time.Second) {
+			return nil
+		}
+	}
+	enrollmentDone := make(chan struct{})
+	go func() {
+		defer close(enrollmentDone)
+		for ctx.Err() == nil {
+			dial, cancelDial := context.WithTimeout(ctx, 8*time.Second)
+			socket, err := dialRelay(dial, origin, "/v2/enrollment-sender", header)
+			cancelDial()
+			if err == nil {
+				withRelayViewer(ctx, socket, func(_ context.Context, pipe net.Conn) {
+					g.handle(tls.Server(pipe, tlsConfig), true)
+				})
+			}
+			if !relayPause(ctx, time.Second) {
+				return
+			}
+		}
+	}()
+	defer func() { cancel(); <-enrollmentDone }()
 	wait := time.Second
 	for ctx.Err() == nil {
 		dial, cancelDial := context.WithTimeout(ctx, 8*time.Second)
-		socket, err := dialRelay(dial, origin, "/v1/sender", header)
+		socket, err := dialRelay(dial, origin, "/v2/sender", header)
 		cancelDial()
 		if err != nil {
 			g.emit(map[string]string{"event": "relayRetry", "message": err.Error()})
@@ -178,7 +243,7 @@ func serveHost(origin, dir, localSocket string) error {
 		}{"ready", receiver})
 		wait = time.Second
 		withRelayViewer(ctx, socket, func(_ context.Context, pipe net.Conn) {
-			g.handle(tls.Server(pipe, tlsConfig))
+			g.handle(tls.Server(pipe, tlsConfig), false)
 		})
 		if !relayPause(ctx, time.Second) {
 			break
@@ -228,13 +293,36 @@ func relayPause(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
-func connectTLS(p profile) (*tls.Conn, error) {
+func connectTLS(ctx context.Context, p profile, key *ecdsa.PrivateKey) (*tls.Conn, error) {
 	if !p.valid() {
 		return nil, errors.New(tr("연결 설정을 읽을 수 없어요.", "Couldn't read the connection settings."))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	socket, err := dialRelay(ctx, p.Relay, "/v1/receiver/"+strings.ToLower(p.Room), nil)
+	room := strings.ToLower(p.Room)
+	path := "/v2/receiver/" + room
+	probe, err := receiverAuthorization(room, http.MethodHead, key)
+	if err != nil {
+		return nil, err
+	}
+	status, err := relayControl(ctx, p.Relay, http.MethodHead, path, probe, nil)
+	if err != nil {
+		return nil, err
+	}
+	var proof string
+	switch status {
+	case http.StatusNoContent:
+		proof, err = receiverAuthorization(room, http.MethodGet, key)
+		if err != nil {
+			return nil, err
+		}
+	case http.StatusForbidden:
+		path = "/v2/enroll/" + room
+		proof = enrollmentAuthorization(p.Invitation)
+	default:
+		return nil, errors.New("relay does not support secure pairing")
+	}
+	socket, err := dialRelay(ctx, p.Relay, path, http.Header{"Authorization": {proof}})
 	if err != nil {
 		return nil, err
 	}

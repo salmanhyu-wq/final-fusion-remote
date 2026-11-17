@@ -114,6 +114,9 @@ final class AudioPlayer {
     private static let lateFrames = Int(SessionAudio.sampleRate * 0.08)
     static var isAvailable: Bool { AudioDecoder().isAvailable }
     private let queue = DispatchQueue(label: "studio-remote.audio-play", qos: .userInteractive)
+    private let admission = NSLock()
+    private var queuedPackets = 0
+    private var acceptingPackets = true
     private let decoder = AudioDecoder()
     private let onDecoded: ((AVAudioPCMBuffer) -> Void)?
     private var engine: AVAudioEngine?
@@ -131,7 +134,17 @@ final class AudioPlayer {
     }
 
     func receive(_ packet: Data, number: UInt32) {
+        guard (1...8192).contains(packet.count) else { return }
+        admission.lock()
+        guard acceptingPackets, queuedPackets < 12 else { admission.unlock(); return }
+        queuedPackets += 1
+        admission.unlock()
         queue.async { [self] in
+            defer {
+                admission.lock()
+                queuedPackets -= 1
+                admission.unlock()
+            }
             guard !stopped else { return }
             // The host restarts numbering with a fresh encoder.
             if let expected = expected, number != expected { decoder.reset() }
@@ -166,6 +179,9 @@ final class AudioPlayer {
     }
 
     func stop() {
+        admission.lock()
+        acceptingPackets = false
+        admission.unlock()
         queue.async { [self] in
             stopped = true
             tearDown()

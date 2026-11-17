@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"net"
 	"net/http"
@@ -45,12 +50,12 @@ func expectLoginFrame(t *testing.T, conn net.Conn, kind byte, id uint16, payload
 
 func TestLoginWindowBridgesApprovedDevices(t *testing.T) {
 	invitation := bytes.Repeat([]byte{1}, 16)
-	approved := bytes.Repeat([]byte{2}, 32)
-	denied := bytes.Repeat([]byte{3}, 32)
-	trusted := map[string]bool{deviceTokenID(approved): true}
+	approved, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	denied, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	trusted := map[string]bool{hex.EncodeToString(devicePublic(approved)): true}
 	for _, tc := range []struct {
 		name  string
-		token []byte
+		key   *ecdsa.PrivateKey
 		ready bool
 		ok    byte
 	}{
@@ -81,8 +86,12 @@ func TestLoginWindowBridgesApprovedDevices(t *testing.T) {
 				}, func(string) {})
 				close(finished)
 			}()
-			greeting := append(append(bytes.Clone(invitation), tc.token...), 0)
+			id := sha256.Sum256(devicePublic(tc.key))
+			greeting := append(append(bytes.Clone(invitation), id[:]...), 0)
 			if err := writeFrame(receiver, 1, greeting); err != nil {
+				t.Fatal(err)
+			}
+			if err := answerDevice(receiver, tc.key, greeting); err != nil {
 				t.Fatal(err)
 			}
 			var reply [1]byte

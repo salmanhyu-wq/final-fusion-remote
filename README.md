@@ -1,4 +1,4 @@
-# 파이널 퓨전 · Final Fusion 1.0.19
+# 파이널 퓨전 · Final Fusion 1.0.20
 
 **내가 쓰려고 만들었습니다.**
 
@@ -6,7 +6,9 @@
 
 하시는 일 모두 잘되시기를 기원합니다.
 
-**[맥 설치 파일 받기 · 1.0.4](https://github.com/salmanhyu-wq/final-fusion-remote/releases/download/v1.0.4/Final-Fusion-1.0.4-macOS.dmg)** · macOS 14 이상
+**[1.0.20 만들기](DEVELOPMENT.md)** · 보내는 맥은 macOS 14 이상
+
+이 버전은 [중계 갱신](Relay/SETUP.md)과 받는 기기 재승인이 필요합니다. 기존 원격 연결을 끊기 전에 받는 앱을 올리거나 새 설치 파일을 따로 준비하세요.
 
 **모니터 없이 켜 둔 맥 미니·맥 스튜디오를, 구형 노트북에서 내 맥처럼 쓰세요.** 집에 있는 맥은 그대로 두고, 노트북에서 선명한 화면과 익숙한 단축키를 씁니다.
 

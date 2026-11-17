@@ -3,7 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
@@ -137,13 +140,14 @@ func TestPairingAndReconnect(t *testing.T) {
 	defer events.Close()
 	defer eventSink.Close()
 	eventReader := bufio.NewReader(events)
-	g := &gateway{state: state, path: path, hostCode: hostCode, out: eventSink, sink: backend.Addr().String()}
+	g := &gateway{state: state, path: path, hostCode: hostCode, out: eventSink, sink: backend.Addr().String(),
+		publish: func([]string) error { return nil }}
 	sock, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sock.Close()
-	listener := tls.NewListener(sock, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{{
+	listener := tls.NewListener(sock, &tls.Config{MinVersion: tls.VersionTLS13, NextProtos: []string{"test-enroll"}, Certificates: []tls.Certificate{{
 		Certificate: [][]byte{state.Cert}, PrivateKey: ed25519.PrivateKey(state.Key),
 	}}})
 	go func() {
@@ -152,7 +156,13 @@ func TestPairingAndReconnect(t *testing.T) {
 			if err != nil {
 				return
 			}
-			go g.handle(conn)
+			go func(conn *tls.Conn) {
+				if conn.Handshake() != nil {
+					conn.Close()
+					return
+				}
+				g.handle(conn, conn.ConnectionState().NegotiatedProtocol == "test-enroll")
+			}(conn.(*tls.Conn))
 		}
 	}()
 	dialer := &net.Dialer{Timeout: 4 * time.Second}
@@ -162,14 +172,23 @@ func TestPairingAndReconnect(t *testing.T) {
 		conn.Close()
 		t.Fatal("connection trusted a mismatched certificate")
 	}
-	join := func(token []byte) net.Conn {
-		conn, err := tls.DialWithDialer(dialer, "tcp4", sock.Addr().String(), clientTLS(p))
+	join := func(key *ecdsa.PrivateKey, enrollment bool) net.Conn {
+		conf := clientTLS(p)
+		if enrollment {
+			conf.NextProtos = []string{"test-enroll"}
+		}
+		conn, err := tls.DialWithDialer(dialer, "tcp4", sock.Addr().String(), conf)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 		invitation, _ := hex.DecodeString(p.Invitation)
-		if err = writeFrame(conn, 1, append(append(invitation, token...), 1)); err != nil {
+		id := sha256.Sum256(devicePublic(key))
+		greeting := append(append(invitation, id[:]...), 1)
+		if err = writeFrame(conn, 1, greeting); err == nil {
+			err = answerDevice(conn, key, greeting)
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
 		return conn
@@ -202,31 +221,35 @@ func TestPairingAndReconnect(t *testing.T) {
 			t.Fatal("valid decision did not reach the pending receiver")
 		}
 	}
-	token := randomBytes(32)
-	first := join(token)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	first := join(key, true)
 	approve(first, true)
-	if kind, data := testFrame(t, first); kind != 2 || string(data) != "screen" {
-		t.Fatal("approved viewer did not reach capture")
+	if kind, _ := testFrame(t, first); kind != deviceAdmitted {
+		t.Fatal("approved viewer was not directed to reconnect")
 	}
 	_ = first.Close()
-	if data := <-auth; !bytes.Equal(data[9:25], hostCode) || data[25] != 1 {
-		t.Fatal("incorrect local credentials")
-	}
-	next := join(token)
+	next := join(key, false)
 	if kind, _ := testFrame(t, next); kind != 2 {
 		t.Fatal("approved device was asked to pair again")
 	}
 	_ = next.Close()
-	<-auth
-	unknown := join(randomBytes(32))
+	if data := <-auth; !bytes.Equal(data[9:25], hostCode) || data[25] != 1 {
+		t.Fatal("incorrect local credentials")
+	}
+	unapproved, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	refused := join(unapproved, false)
+	if _, err := refused.Read(make([]byte, 1)); err == nil {
+		t.Fatal("unapproved device reached the desktop")
+	}
+	_ = refused.Close()
+	unknown := join(unapproved, true)
 	approve(unknown, false)
 	if kind, _ := testFrame(t, unknown); kind != 7 {
 		t.Fatal("denied device received a screen")
 	}
 	_ = unknown.Close()
 	loaded, err := loadHostState(path)
-	hash := sha256.Sum256(token)
-	if err != nil || !loaded.Trusted[hex.EncodeToString(hash[:])] || len(loaded.Trusted) != 1 {
+	if err != nil || !loaded.TrustedKeys[hex.EncodeToString(devicePublic(key))] || len(loaded.TrustedKeys) != 1 {
 		t.Fatal("approval did not persist")
 	}
 }
@@ -279,9 +302,9 @@ func TestGatewayForwardsMacDisplayOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	device := bytes.Repeat([]byte{7}, 32)
-	hash := sha256.Sum256(device)
-	state.Trusted[hex.EncodeToString(hash[:])] = true
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	hash := sha256.Sum256(devicePublic(key))
+	state.TrustedKeys = map[string]bool{hex.EncodeToString(devicePublic(key)): true}
 	invitation, err := hex.DecodeString(state.Invitation)
 	if err != nil {
 		t.Fatal(err)
@@ -294,12 +317,15 @@ func TestGatewayForwardsMacDisplayOptions(t *testing.T) {
 	g := &gateway{state: state, path: statePath, hostCode: hostCode, out: io.Discard, sink: backend.Addr().String()}
 	client, server := net.Pipe()
 	defer client.Close()
-	go g.handle(server)
+	go g.handle(server, false)
 	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
 	options := []byte{0, 3, 6, 144, 4, 26}
 	greeting := []byte{directGreeting, 3, 6, 144, 4, 26, 11, 64, 7, 8}
-	hello := append(append(invitation, device...), greeting...)
+	hello := append(append(invitation, hash[:]...), greeting...)
 	if err := writeFrame(client, 1, hello); err != nil {
+		t.Fatal(err)
+	}
+	if err := answerDevice(client, key, hello); err != nil {
 		t.Fatal(err)
 	}
 

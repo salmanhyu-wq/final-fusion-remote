@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -16,13 +17,13 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
     private var onEndpoint: ((NWEndpoint.Port) -> Void)?
     private var onFailure: (() -> Void)?
 
-    func start(_ profile: ReceiverProfile, onEndpoint: @escaping (NWEndpoint.Port) -> Void,
+    func start(_ profile: ReceiverProfile, key: P256.Signing.PrivateKey, onEndpoint: @escaping (NWEndpoint.Port) -> Void,
                onFailure: @escaping () -> Void) throws {
         guard var address = URLComponents(string: profile.relay), profile.valid else {
             throw StudioError.message(L("받는 앱의 연결 설정을 읽을 수 없어요.", "Couldn't read the viewer app's connection settings."))
         }
-        address.scheme = "wss"
-        address.path = "/v1/receiver/" + profile.room.lowercased()
+        let room = profile.room.lowercased()
+        address.path = "/v2/receiver/" + room
         guard let url = address.url else { throw StudioError.message(L("연결 서버 주소를 확인하세요.", "Check the connection server address.")) }
 
         let parameters = tcpParameters()
@@ -38,11 +39,46 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
         configuration.timeoutIntervalForResource = 24 * 60 * 60
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         self.session = session
-        var request = URLRequest(url: url)
-        request.networkServiceType = .responsiveData
-        let socket = session.webSocketTask(with: request)
-        socket.maximumMessageSize = 65536
-        self.socket = socket
+        var probe = URLRequest(url: url, timeoutInterval: 8)
+        probe.httpMethod = "HEAD"
+        probe.setValue(try relayAuthorization(room: room, method: "HEAD", key: key),
+                       forHTTPHeaderField: "Authorization")
+        let probeTask = session.dataTask(with: probe) { [weak self] _, response, _ in
+            guard let self else { return }
+            self.queue.async {
+                guard !self.stopped else { return }
+                guard let status = (response as? HTTPURLResponse)?.statusCode,
+                      let invite = strictHex(profile.invitation, count: 16),
+                      var socketURL = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                    self.finish(notify: true)
+                    return
+                }
+                socketURL.scheme = "wss"
+                let auth: String
+                switch status {
+                case 204:
+                    guard let proof = try? relayAuthorization(room: room, method: "GET", key: key) else {
+                        self.finish(notify: true)
+                        return
+                    }
+                    auth = proof
+                case 403:
+                    socketURL.path = "/v2/enroll/" + room
+                    auth = "Bearer " + hex(Data(SHA256.hash(data: invite)))
+                default:
+                    self.finish(notify: true)
+                    return
+                }
+                guard let endpoint = socketURL.url else { self.finish(notify: true); return }
+                var request = URLRequest(url: endpoint)
+                request.networkServiceType = .responsiveData
+                request.setValue(auth, forHTTPHeaderField: "Authorization")
+                let socket = session.webSocketTask(with: request)
+                socket.maximumMessageSize = 65536
+                self.socket = socket
+                socket.resume()
+            }
+        }
 
         listener.stateUpdateHandler = { [weak self, weak listener] state in
             guard let self = self, !self.stopped else { return }
@@ -76,7 +112,7 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
             connection.start(queue: self.queue)
         }
         listener.start(queue: queue)
-        socket.resume()
+        probeTask.resume()
     }
 
     func close() { queue.async { self.finish(notify: false) } }
@@ -114,11 +150,17 @@ final class RelayTunnel: NSObject, URLSessionWebSocketDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         queue.async {
+            guard task === self.socket else { return }
             if self.loginKeepAlive != nil, let cause = error as NSError? {
                 NSLog("Final Fusion login relay ended: %@ %ld", cause.domain, cause.code)
             }
             self.finish(notify: true)
         }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 
     private func pumpIfReady() {

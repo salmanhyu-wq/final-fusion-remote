@@ -28,11 +28,13 @@ read_info() {
 identifier="$(read_info CFBundleIdentifier)"
 directory="$(read_info FinalFusionSettingsDirectory)"
 build="$(read_info CFBundleVersion)"
-[[ "$identifier" =~ ^[[:alnum:]][[:alnum:].-]+$ && "$identifier" == *.* &&
-   "$directory" =~ ^[[:alnum:]][[:alnum:]\ ._-]*$ && "$build" =~ ^[0-9]+$ ]] || usage
+[[ "$build" =~ ^[0-9]+$ ]] || usage
 label="$identifier.login-window"
 helper_name="$(read_info FinalFusionLoginWindowHelperName || true)"
-[[ -z "$helper_name" || "$helper_name" == FinalFusionLoginWindow ]] || usage
+case "$identifier:$directory:$helper_name" in
+    'app.finalfusion.remote:Final Fusion:') ;;
+    *) usage ;;
+esac
 helper="/Library/PrivilegedHelperTools/${helper_name:-$label}"
 job="/Library/LaunchDaemons/$label.plist"
 service="system/$label"
@@ -88,7 +90,7 @@ check_requirements() {
         as_owner=()
         if [[ "$(/usr/bin/id -u)" == 0 ]]; then as_owner=(/usr/bin/sudo -u "$owner" --); fi
         # Bash 3.2 under nounset considers an empty array unset.
-        trusted="$("${as_owner[@]+"${as_owner[@]}"}" /usr/bin/plutil -extract trusted xml1 -o - "$settings/host-state.json" 2>/dev/null || true)"
+        trusted="$("${as_owner[@]+"${as_owner[@]}"}" /usr/bin/plutil -extract trustedKeys xml1 -o - "$settings/host-state.json" 2>/dev/null || true)"
         if [[ "$trusted" != *'<true/>'* ]]; then echo pair-viewer; fi
     fi
 }
@@ -107,6 +109,37 @@ stop_job() {
     /bin/launchctl bootout "$service" 2>/dev/null || ! is_loaded
 }
 
+# The function ran in a subshell for its output. Read this account's path again
+# and reject a console change while the authorization dialog was open.
+[[ "$owner" == "$(/usr/bin/stat -f %Su /dev/console)" ]] || exit 1
+account_home="$(/usr/bin/dscacheutil -q user -a name "$owner" | /usr/bin/sed -n 's/^dir: //p')"
+[[ "$account_home" == /* && "$account_home" != / ]] || exit 1
+settings="$account_home/Library/Application Support/$directory"
+root_file() {
+    [[ -f "$1" && ! -L "$1" && "$(/usr/bin/stat -f '%u:%g' "$1")" == '0:0' ]]
+}
+job_value() {
+    /usr/bin/plutil -extract "$2" raw -o - "$1" 2>/dev/null
+}
+if [[ -e "$job" || -L "$job" ]]; then
+    root_file "$job" &&
+        [[ "$(job_value "$job" Label)" == "$label" &&
+           "$(job_value "$job" UserName)" == "$owner" &&
+           "$(job_value "$job" ProgramArguments.0)" == "$helper" &&
+           "$(job_value "$job" ProgramArguments.1)" == login-window-host &&
+           "$(job_value "$job" ProgramArguments.2)" == "$settings" ]] &&
+        ! job_value "$job" Program >/dev/null &&
+        ! job_value "$job" ProgramArguments.3 >/dev/null || exit 1
+else
+    ! is_loaded || exit 1
+fi
+if [[ -e "$helper" || -L "$helper" ]]; then root_file "$helper" || exit 1; fi
+for other_job in /Library/LaunchDaemons/*.plist; do
+    [[ "$other_job" != "$job" && -f "$other_job" ]] || continue
+    [[ "$(job_value "$other_job" Program || true)" != "$helper" &&
+       "$(job_value "$other_job" ProgramArguments.0 || true)" != "$helper" ]] || exit 1
+done
+
 if [[ "$action" == remove ]]; then
     stop_job
     /bin/rm -f -- "$job" "$helper"
@@ -118,12 +151,7 @@ if [[ -n "$issues" ]]; then
     printf '%s\n' 'Check these items in the Final Fusion host settings:' "$issues" >&2
     exit 1
 fi
-# The function ran in a subshell for its output. Read this account's path again
-# and reject a console change while the authorization dialog was open.
-[[ "$owner" == "$(/usr/bin/stat -f %Su /dev/console)" ]] || exit 1
-account_home="$(/usr/bin/dscacheutil -q user -a name "$owner" | /usr/bin/sed -n 's/^dir: //p')"
-[[ "$account_home" == /* && "$account_home" != / ]] || exit 1
-settings="$account_home/Library/Application Support/$directory"
+
 expected_digest="${2:-$(/usr/bin/shasum -a 256 < "$source_helper")}"
 expected_digest="${expected_digest%% *}"
 [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]] || exit 1

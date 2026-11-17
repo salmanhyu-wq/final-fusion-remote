@@ -33,6 +33,8 @@ final class ClipboardShare {
     static let maxImage = 32 * 1024 * 1024
     static let maxFiles = 200 * 1024 * 1024
     static let maxFileCount = 64
+    private static let maxStoredFiles = 512
+    private static let maxStoredBytes = 2 * maxFiles
     static let screenshotMarker = NSPasteboard.PasteboardType("app.finalfusion.remote-screenshot")
     private static let maxQueuedBytes = 4 * 1024 * 1024
     private static let fileChunksPerTick = 2
@@ -104,6 +106,7 @@ final class ClipboardShare {
         var percent = 0
         var buffers: [Data]
         var directory: URL?
+        var reservation: FileHandle?
         var handle: FileHandle?
         var urls: [URL] = []
 
@@ -155,12 +158,75 @@ final class ClipboardShare {
 
     /// Files from sessions that ended more than a day ago are no longer needed for a paste.
     static func removeOldFiles(in folder: URL = defaultFolder) {
+        guard let reservation = lockFiles(in: folder, create: false) else { return }
+        defer { try? reservation.close() }
+        removeExpiredParcels(in: folder)
+    }
+
+    private static func removeExpiredParcels(in folder: URL) {
         let keys: [URLResourceKey] = [.contentModificationDateKey]
         guard let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys) else { return }
-        for item in items {
+        for item in items where UUID(uuidString: item.lastPathComponent) != nil {
             let modified = (try? item.resourceValues(forKeys: Set(keys)))?.contentModificationDate ?? .distantPast
             if Date().timeIntervalSince(modified) > 86_400 { try? FileManager.default.removeItem(at: item) }
         }
+    }
+
+    private static func lockFiles(in folder: URL, create: Bool) -> FileHandle? {
+        if create {
+            guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+                                                            attributes: [.posixPermissions: 0o700])) != nil else { return nil }
+        }
+        let path = folder.appendingPathComponent(".receive.lock")
+        let fd = path.withUnsafeFileSystemRepresentation { raw in
+            raw.map { open($0, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600) } ?? -1
+        }
+        guard fd >= 0 else { return nil }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+
+    private static func reserveFiles(in folder: URL, bytes: Int, files: Int, keeping: Set<String>) -> FileHandle? {
+        guard let reservation = lockFiles(in: folder, create: true) else { return nil }
+        removeExpiredParcels(in: folder)
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]
+        var totalBytes = Int64(bytes)
+        var totalFiles = files
+        var removable: [(url: URL, modified: Date, bytes: Int64, files: Int)] = []
+        guard let parcels = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys)) else { return nil }
+        for parcel in parcels where UUID(uuidString: parcel.lastPathComponent) != nil {
+            guard let attributes = try? parcel.resourceValues(forKeys: keys), attributes.isSymbolicLink == false,
+                  attributes.isDirectory == true,
+                  let items = try? fm.contentsOfDirectory(at: parcel, includingPropertiesForKeys: Array(keys)) else { return nil }
+            var parcelBytes: Int64 = 0
+            for item in items {
+                guard let attributes = try? item.resourceValues(forKeys: keys),
+                      attributes.isRegularFile == true, attributes.isSymbolicLink == false,
+                      let size = attributes.fileSize, size >= 0 else { return nil }
+                parcelBytes += Int64(size)
+            }
+            totalBytes += parcelBytes
+            totalFiles += items.count
+            if !keeping.contains(parcel.standardizedFileURL.path) {
+                removable.append((parcel, attributes.contentModificationDate ?? .distantPast, parcelBytes, items.count))
+            }
+        }
+        for old in removable.sorted(by: { $0.modified < $1.modified }) {
+            if totalBytes <= maxStoredBytes && totalFiles <= maxStoredFiles { break }
+            guard (try? fm.removeItem(at: old.url)) != nil else { continue }
+            totalBytes -= old.bytes
+            totalFiles -= old.files
+        }
+        return totalBytes <= maxStoredBytes && totalFiles <= maxStoredFiles ? reservation : nil
+    }
+
+    private func pastedParcels() -> Set<String> {
+        Set((pasteboard.pasteboardItems ?? []).compactMap {
+            guard $0.types.contains(.fileURL), let path = $0.string(forType: .fileURL),
+                  let url = URL(string: path), url.isFileURL else { return nil }
+            return url.deletingLastPathComponent().standardizedFileURL.path
+        })
     }
 
     /// Only what is copied after this point is shared.
@@ -405,8 +471,15 @@ final class ClipboardShare {
                   let names = Self.acceptedNames(header.parts) else { return }
             let parcel = Incoming(id: id, header: header, names: names)
             if parcel.files > 0 {
+                guard let reservation = Self.reserveFiles(in: folder, bytes: parcel.total, files: parcel.files,
+                                                          keeping: pastedParcels()) else {
+                    report(.interrupted, run: run)
+                    return
+                }
+                parcel.reservation = reservation
                 let directory = folder.appendingPathComponent(UUID().uuidString, isDirectory: true)
-                guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil else { return }
+                guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                                attributes: [.posixPermissions: 0o700])) != nil else { return }
                 parcel.directory = directory
                 report(.receiving(files: parcel.files, progress: 0), run: run)
             }
