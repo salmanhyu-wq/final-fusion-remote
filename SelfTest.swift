@@ -178,6 +178,15 @@ func runSelfTests() -> Never {
     check(MacInputSource.validID("com.apple.inputmethod.Korean.2SetKorean") &&
           !MacInputSource.validID("../../layout"), "only keyboard input source identifiers are accepted")
 
+    let korean = MacInputSource.twoSetKorean, abc = "com.apple.keylayout.ABC"
+    check(!MacInputSource.matches(korean, selected: korean, layout: abc) &&
+          !MacInputSource.matches(korean, selected: korean, layout: nil) &&
+          MacInputSource.matches(korean, selected: korean, layout: MacInputSource.twoSetLayout),
+          "two-set Korean checks the active layout even when the menu already says Korean")
+    check(MacInputSource.matches(abc, selected: abc, layout: nil) &&
+          !MacInputSource.matches(korean, selected: abc, layout: MacInputSource.twoSetLayout),
+          "English and an independently changed input source keep their own selection")
+
     var swipe = TrackpadGestures()
     let fingers = [CGPoint(x: 0.4, y: 0.25), CGPoint(x: 0.5, y: 0.3), CGPoint(x: 0.6, y: 0.25)]
     check(swipe.update(fingers, at: 1, aspect: 0.65) == nil, "swipe anchors on contact")

@@ -74,6 +74,7 @@ if [[ "$sign_identity" != "-" ]]; then
   /usr/libexec/PlistBuddy -c "Add :FinalFusionSigningIdentity string $sign_identity" "$app/Contents/Info.plist"
 fi
 /bin/cp -- Link/ui/{send,receive}-agent{,-en}.txt "$app/Contents/Resources/"
+/bin/cp -- Assets/macism-LICENSE.txt "$app/Contents/Resources/"
 /bin/cp -- Assets/MyMusicGacha.png "$app/Contents/Resources/MyMusicGacha.png"
 # App name and permission text follow the OS language (ko.lproj / en.lproj).
 write_names() {

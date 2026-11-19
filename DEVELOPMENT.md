@@ -53,6 +53,12 @@ To check 1.0.4 on hardware, disconnect the host monitor, reconnect from a Mac vi
 
 The self test checks the Opus round trip, and the session test checks that sound is sent only after a request, arrives in order, decodes to the test tone and stops on request. `--test-audio-capture <file>` captures the Mac's real sound for a few seconds with the speakers muted; it needs Screen Recording permission, so open the signed app with that argument (`open -n -W "$app" --args --test-audio-capture "$out/audio.txt"`) and read the file. Listening on a real viewer and checking lip sync remain hardware checks.
 
+## Mac input switching in 1.0.22 (build 52)
+
+A Mac host can report two-set Korean while its active keyboard layout is still ABC. The host now asks the frontmost app to switch and checks both the selected input source and the underlying layout. When the input menu protocol is unavailable, it uses the standard input source API. The viewer also clears the Caps Lock modifier from forwarded keys when it consumes Caps Lock for language switching.
+
+To check the fix on two Macs, keep one text field focused. Use Caps Lock on the viewer to type `가`, switch to English and type `rk`, then switch back and type `가` again. The source includes the [macism license](Assets/macism-LICENSE.txt) for the input menu implementation.
+
 ## Mac input switching in 1.0.21
 
 The viewer checks its input source before sending a key down so that a detected change reaches the host before the key. The host checks the selected source and retries once after an unsuccessful change. The diagnostics report checks the host’s current selection instead of keeping the previous result.

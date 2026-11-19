@@ -229,6 +229,26 @@ enum KeyboardLayoutResult: String, Codable {
 }
 
 enum MacInputSource {
+    static let twoSetKorean = "com.apple.inputmethod.Korean.2SetKorean"
+    static let twoSetLayout = "com.apple.keylayout.2SetHangul"
+
+    static func matches(_ requested: String, selected: String?, layout: String?) -> Bool {
+        selected == requested && (requested != twoSetKorean || layout == twoSetLayout)
+    }
+
+    static func isActive(_ requested: String) -> Bool {
+        let layout = requested == twoSetKorean ? TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue() : nil
+        return matches(requested, selected: currentID(), layout: layout.flatMap(identifier))
+    }
+
+    static func select(_ target: TISInputSource, id: String, from current: String) -> Bool {
+        if id == twoSetKorean || current == twoSetKorean {
+            guard !IsSecureEventInputEnabled() else { return false }
+            if FocusedKoreanInput.select(target) || isActive(id) { return true }
+        }
+        return TISSelectInputSource(target) == noErr
+    }
+
     static func currentID() -> String? {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return nil }
         return identifier(source)
@@ -263,7 +283,7 @@ enum MacInputSource {
         let current = currentID()
         let ascii = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue()
         let lastEnglish = ascii.flatMap(identifier)
-        let defaultKorean = "com.apple.inputmethod.Korean.2SetKorean"
+        let defaultKorean = twoSetKorean
         guard let ko = current.flatMap({ korean.contains($0) ? $0 : nil }) ??
                   (korean.contains(defaultKorean) ? defaultKorean : korean.first),
               let en = current.flatMap({ english.contains($0) ? $0 : nil }) ??
@@ -287,6 +307,40 @@ enum MacInputSource {
     private static func identifier(_ source: TISInputSource) -> String? {
         guard let value = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
         return Unmanaged<CFString>.fromOpaque(value).takeUnretainedValue() as String
+    }
+}
+
+// Use the input menu protocol to ask the front app to activate its text service.
+private enum FocusedKoreanInput {
+    private typealias Port = @convention(c) (CFAllocator?, CFString, pid_t) -> Unmanaged<CFMessagePort>?
+    private typealias Flatten = @convention(c) (TISInputSource, UnsafeMutablePointer<Unmanaged<AnyObject>?>) -> DarwinBoolean
+
+    static func select(_ source: TISInputSource) -> Bool {
+        let scope = UnsafeMutableRawPointer(bitPattern: -2)
+        guard let portSymbol = dlsym(scope, "CFMessagePortCreatePerProcessRemote"),
+              let sourceSymbol = dlsym(scope, "_CreateFlattenedInputSource") else { return false }
+
+        guard let app = NSWorkspace.shared.frontmostApplication, !app.isTerminated,
+              app.processIdentifier != getpid(),
+              let port = unsafeBitCast(portSymbol, to: Port.self)(nil, "com.apple.tsm.portname" as CFString, app.processIdentifier)?.takeRetainedValue()
+        else { return false }
+
+        var flattened: Unmanaged<AnyObject>?
+        guard unsafeBitCast(sourceSymbol, to: Flatten.self)(source, &flattened).boolValue,
+              let value = flattened?.takeRetainedValue(),
+              let data = try? PropertyListSerialization.data(fromPropertyList: ["tsmInputSourceSelectedInpSrcKey": value],
+                                                              format: .xml, options: 0) else { return false }
+        // The reply-only run loop mode keeps later keys in the host's normal queue.
+        var response: Unmanaged<CFData>?
+        let status = CFMessagePortSendRequest(port, 7, data as CFData, 0.15, 0.3,
+                                              "FinalFusion.KeyboardSelection" as CFString, &response)
+        let reply = response?.takeRetainedValue()
+        guard status == kCFMessagePortSuccess else { return false }
+        if let reply = reply {
+            guard let fields = (try? PropertyListSerialization.propertyList(from: reply as Data, format: nil)) as? [String: Any] else { return false }
+            if let error = fields["tsmInputModeReplyToServerErrorKey"] as? NSNumber, error.intValue != 0 { return false }
+        }
+        return true
     }
 }
 
@@ -318,7 +372,12 @@ final class SessionKeyboardLayout {
             guard Self.restore(previous) else { return .senderKept }
             change = nil
         }
-        guard current != id else { return .matched }
+        if current == id {
+            if MacInputSource.isActive(id) { return .matched }
+            guard let target = MacInputSource.selectable(id),
+                  MacInputSource.select(target, id: id, from: current), MacInputSource.isActive(id) else { return .senderKept }
+            return .matched
+        }
         if change == nil && FileManager.default.fileExists(atPath: Self.journal.path) {
             return .senderKept
         }
@@ -333,9 +392,9 @@ final class SessionKeyboardLayout {
         do {
             try Self.save(next)
         } catch { return .senderKept }
-        if TISSelectInputSource(target) == noErr {
+        if MacInputSource.select(target, id: id, from: current) {
             change = next
-            return MacInputSource.currentID() == id ? .matched : .senderKept
+            return MacInputSource.isActive(id) ? .matched : .senderKept
         }
         if let previous = previous { try? Self.save(previous) }
         else { try? FileManager.default.removeItem(at: Self.journal) }
@@ -355,7 +414,7 @@ final class SessionKeyboardLayout {
         guard let current = MacInputSource.currentID() else { return false }
         if current == change.selected && current != change.original {
             guard let original = MacInputSource.selectable(change.original),
-                  TISSelectInputSource(original) == noErr else { return false }
+                  MacInputSource.select(original, id: change.original, from: current) else { return false }
         }
         do {
             try FileManager.default.removeItem(at: journal)

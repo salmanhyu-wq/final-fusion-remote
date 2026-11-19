@@ -452,7 +452,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
             }
             if let layout = report.keyboardLayout {
                 lines.append(layout == .matched ? L("입력 언어를 받는 맥에 맞췄어요.", "Keyboard language matched the viewer Mac.")
-                                                : L("보내는 맥의 입력 언어를 그대로 썼어요.", "Kept the host Mac's keyboard language."))
+                                                : L("보내는 맥에서 입력 언어 일치를 확인하지 못했어요.", "The host could not confirm the requested keyboard layout."))
             }
             for sample in report.receiver.displays {
                 guard let screen = report.senderDisplays.first(where: { $0.id == sample.id }) else { continue }

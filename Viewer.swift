@@ -1149,7 +1149,10 @@ final class RemoteView: NSView {
     }
 
     func handleKey(_ event: NSEvent) {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // If this view consumes Caps as a language key, its latch is not a remote modifier.
+        var keyboardFlags = event.modifierFlags
+        if display.koreanCaps == true && !usesNativeCapsSwitch { keyboardFlags.remove(.capsLock) }
+        let flags = keyboardFlags.intersection(.deviceIndependentFlagsMask)
         if event.type == .keyUp && localShortcut == event.keyCode { localShortcut = nil; return }
         if !kioskInput && event.type == .keyDown && flags == [.control, .option] {
             switch event.keyCode {
@@ -1158,7 +1161,7 @@ final class RemoteView: NSView {
             default: break
             }
         }
-        let rawFlags = UInt64(event.modifierFlags.rawValue) & MacModifierKey.supportedFlags
+        let rawFlags = UInt64(keyboardFlags.rawValue) & MacModifierKey.supportedFlags
         if event.keyCode == UInt16(kVK_CapsLock) {
             if usesNativeCapsSwitch { return }
             if display.koreanCaps == true {
@@ -1199,7 +1202,7 @@ final class RemoteView: NSView {
         case .keyDown: action = .keyDown
         case .keyUp: action = .keyUp
         case .flagsChanged:
-            guard let held = modifiers.update(key: event.keyCode, flags: event.modifierFlags) else { return }
+            guard let held = modifiers.update(key: event.keyCode, flags: keyboardFlags) else { return }
             action = .flags
             state = held ? 1 : 0
         default: return
@@ -1207,7 +1210,7 @@ final class RemoteView: NSView {
         let keyboardType = event.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType)
         var outgoingFlags = rawFlags
         if display.macInputMatching == true && action != .flags {
-            outgoingFlags = modifiers.synchronize(flags: event.modifierFlags) { key, down, flags in
+            outgoingFlags = modifiers.synchronize(flags: keyboardFlags) { key, down, flags in
                 var transition = Input(action: .flags, display: self.display.id, a: Int(key), b: down ? 1 : 0, flags: flags)
                 transition.keyboardType = keyboardType
                 self.send?(transition)

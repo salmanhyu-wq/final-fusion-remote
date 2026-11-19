@@ -335,7 +335,7 @@ enum ReceiverExport {
         try fm.copyItem(at: source, to: executable.appendingPathComponent("StudioRemote"))
         try fm.copyItem(at: icon, to: resources.appendingPathComponent("StudioRemote.icns"))
         try fm.copyItem(at: agent, to: resources.appendingPathComponent("receive-agent.txt"))
-        for extra in ["receive-agent-en.txt", "MyMusicGacha.png"] {
+        for extra in ["receive-agent-en.txt", "MyMusicGacha.png", "macism-LICENSE.txt"] {
             if let url = Bundle.main.resourceURL?.appendingPathComponent(extra), fm.fileExists(atPath: url.path) {
                 try fm.copyItem(at: url, to: resources.appendingPathComponent(extra))
             }

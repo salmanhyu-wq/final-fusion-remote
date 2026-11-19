@@ -1364,9 +1364,10 @@ private final class HostInput {
     var supportsKoreanCaps: Bool { koreanPair != nil }
     private var requestedKeyboardSource: String?
     private var keyboardSourceRetry: DispatchWorkItem?
+    private var repairedKoreanFocus: pid_t?
     var keyboardLayoutResult: KeyboardLayoutResult? {
         guard let id = requestedKeyboardSource else { return nil }
-        return MacInputSource.currentID() == id ? .matched : .senderKept
+        return MacInputSource.isActive(id) ? .matched : .senderKept
     }
     private(set) var screenshotCopied: Bool?
 
@@ -1380,6 +1381,7 @@ private final class HostInput {
         keyboardSourceRetry?.cancel()
         keyboardSourceRetry = nil
         requestedKeyboardSource = nil
+        repairedKoreanFocus = nil
         screenshotCopied = nil
     }
 
@@ -1401,6 +1403,7 @@ private final class HostInput {
         keyboardSourceRetry?.cancel()
         keyboardSourceRetry = nil
         requestedKeyboardSource = id
+        repairedKoreanFocus = nil
         guard keyboardLayout.match(id) == .senderKept else { return }
 
         // macOS can finish a source or focus change after the original request.
@@ -1411,6 +1414,28 @@ private final class HostInput {
         }
         keyboardSourceRetry = retry
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: retry)
+    }
+
+    // A focus or document change can leave the menu in Korean and the app in ABC.
+    // Repair that mismatch once per app until it clears. Respect a local switch to English.
+    private func repairKoreanInputIfNeeded() {
+        guard requestedKeyboardSource == MacInputSource.twoSetKorean else { return }
+        if MacInputSource.isActive(MacInputSource.twoSetKorean) {
+            repairedKoreanFocus = nil
+            return
+        }
+        if let retry = keyboardSourceRetry {
+            // The first key arrived before the scheduled retry. Use the same retry now.
+            retry.cancel()
+            keyboardSourceRetry = nil
+            _ = keyboardLayout.match(MacInputSource.twoSetKorean)
+            return
+        }
+        guard MacInputSource.currentID() == MacInputSource.twoSetKorean, !IsSecureEventInputEnabled(),
+              let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              pid != repairedKoreanFocus else { return }
+        repairedKoreanFocus = pid
+        _ = keyboardLayout.match(MacInputSource.twoSetKorean)
     }
 
     func release() {
@@ -1514,6 +1539,10 @@ private final class HostInput {
                     }
                     return
                 }
+            }
+            if input.action == .keyDown && input.repeatKey != true &&
+                flags.intersection([.maskCommand, .maskControl]).isEmpty {
+                repairKoreanInputIfNeeded()
             }
             let modifier = input.action == .flags
             let down = input.action == .keyDown || (modifier && input.b == 1)
