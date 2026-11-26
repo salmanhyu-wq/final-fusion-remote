@@ -53,6 +53,10 @@ To check 1.0.4 on hardware, disconnect the host monitor, reconnect from a Mac vi
 
 The self test checks the Opus round trip, and the session test checks that sound is sent only after a request, arrives in order, decodes to the test tone and stops on request. `--test-audio-capture <file>` captures the Mac's real sound for a few seconds with the speakers muted; it needs Screen Recording permission, so open the signed app with that argument (`open -n -W "$app" --args --test-audio-capture "$out/audio.txt"`) and read the file. Listening on a real viewer and checking lip sync remain hardware checks.
 
+## Mac viewer audio cleanup in 1.0.24 (build 54)
+
+Two macOS 11 viewer crash reports identified a dispatch queue trap during Audio Queue callback cleanup. The viewer now uses the C buffer callback. It forwards completion to the playback queue, which alone creates and disposes the output. Completion from an earlier output cannot affect a replacement. The audio format and connection protocol are unchanged.
+
 ## Mac viewer recovery in 1.0.23 (build 53)
 
 The Mac viewer opens a fresh session on wake. While awake, it reconnects if the host stops answering keepalive checks for 12 seconds. A still desktop stays connected while the host answers. If the video decoder stops progressing, the viewer requests a keyframe, then reconnects if the requests fail. A local macOS log entry records a blocked viewer UI and when it responds again.

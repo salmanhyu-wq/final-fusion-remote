@@ -115,7 +115,6 @@ final class AudioPlayer {
     private static let lateFrames = Int(SessionAudio.sampleRate * 0.08)
     private static let bufferFrames = 4096
     private static let bytesPerFrame = SessionAudio.channels * MemoryLayout<Float>.stride
-    private static let callbackQueue = DispatchQueue(label: "studio-remote.audio-output")
     static var isAvailable: Bool { AudioDecoder().isAvailable }
 
     private let queue = DispatchQueue(label: "studio-remote.audio-play", qos: .userInteractive)
@@ -124,7 +123,8 @@ final class AudioPlayer {
     private var acceptingPackets = true
     private let decoder = AudioDecoder()
     private let onDecoded: ((AVAudioPCMBuffer) -> Void)?
-    private var output: AudioQueueRef?
+    private var output: Output?
+    private var canStartOutput = true
     private var outputGeneration: UInt64 = 0
     private var outputStarted = false
     private var availableBuffers: [AudioQueueBufferRef] = []
@@ -136,13 +136,60 @@ final class AudioPlayer {
     private var played = false
     private var expected: UInt32?
 
+    // AudioToolbox receives only the buffer callback context. It never owns or calls the player directly.
+    private struct Output {
+        private final class Completion {
+            let queue: DispatchQueue
+            let recycle: (AudioQueueBufferRef) -> Void
+
+            init(queue: DispatchQueue, recycle: @escaping (AudioQueueBufferRef) -> Void) {
+                self.queue = queue
+                self.recycle = recycle
+            }
+        }
+
+        let reference: AudioQueueRef
+        private let completion: Unmanaged<Completion>
+
+        init?(format: AudioStreamBasicDescription, queue: DispatchQueue,
+              recycle: @escaping (AudioQueueBufferRef) -> Void) {
+            let completion = Unmanaged.passRetained(Completion(queue: queue, recycle: recycle))
+            var queueRef: AudioQueueRef?
+            var format = format
+            // The dispatch-block API can reenter its callback queue during cleanup on macOS 11.
+            // The C callback only posts a buffer completion and never starts or disposes the output.
+            let status = AudioQueueNewOutput(&format, { context, _, buffer in
+                guard let context else { return }
+                let completion = Unmanaged<Completion>.fromOpaque(context).takeUnretainedValue()
+                completion.queue.async { completion.recycle(buffer) }
+            }, completion.toOpaque(), nil, nil, 0, &queueRef)
+            guard status == noErr, let queueRef else {
+                if let queueRef {
+                    if AudioQueueDispose(queueRef, true) == noErr { completion.release() }
+                } else {
+                    completion.release()
+                }
+                return nil
+            }
+            reference = queueRef
+            self.completion = completion
+        }
+
+        func dispose() -> Bool {
+            // After synchronous disposal on the playback queue, AudioToolbox cannot invoke the callback again.
+            guard AudioQueueDispose(reference, true) == noErr else { return false }
+            completion.release()
+            return true
+        }
+    }
+
     /// A test passes onDecoded to receive the sound instead of playing it.
     init(onDecoded: ((AVAudioPCMBuffer) -> Void)? = nil) {
         self.onDecoded = onDecoded
     }
 
     deinit {
-        if let output { AudioQueueDispose(output, true) }
+        if let output { queue.async { _ = output.dispose() } }
     }
 
     func receive(_ packet: Data, number: UInt32) {
@@ -188,14 +235,14 @@ final class AudioPlayer {
         if queuedFrames > 0 && now >= lastOutputProgress + .milliseconds(500) {
             tearDown()
         }
-        guard now >= nextOutputAttempt else { return }
+        guard canStartOutput, now >= nextOutputAttempt else { return }
         let frames = Int(buffer.frameLength)
         guard (1...Self.bufferFrames).contains(frames), let channels = buffer.floatChannelData else { return }
         if output == nil && !makeOutput() {
             outputFailed()
             return
         }
-        guard let output else { return }
+        guard let output = output?.reference else { return }
         guard queuedFrames <= cushion + Self.lateFrames else { return }
         if queuedFrames == 0 {
             lastOutputProgress = now
@@ -212,31 +259,26 @@ final class AudioPlayer {
     }
 
     private func makeOutput() -> Bool {
-        var format = AudioStreamBasicDescription(
+        let format = AudioStreamBasicDescription(
             mSampleRate: SessionAudio.sampleRate, mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian,
             mBytesPerPacket: UInt32(Self.bytesPerFrame), mFramesPerPacket: 1,
             mBytesPerFrame: UInt32(Self.bytesPerFrame), mChannelsPerFrame: UInt32(SessionAudio.channels),
             mBitsPerChannel: 32, mReserved: 0)
         let generation = outputGeneration
-        let playbackQueue = queue
-        var newOutput: AudioQueueRef?
-        // Keep completion delivery separate so disposing on the playback queue cannot wait on itself.
-        let status = AudioQueueNewOutputWithDispatchQueue(&newOutput, &format, 0, Self.callbackQueue) { [weak self] _, buffer in
-            playbackQueue.async { [weak self] in
-                guard let self, self.outputGeneration == generation,
-                      let frames = self.scheduledBuffers.removeValue(forKey: buffer) else { return }
-                self.queuedFrames -= frames
-                self.availableBuffers.append(buffer)
-                self.lastOutputProgress = .now()
-            }
+        let nextOutput = Output(format: format, queue: queue) { [weak self] buffer in
+            guard let self, self.outputGeneration == generation,
+                  let frames = self.scheduledBuffers.removeValue(forKey: buffer) else { return }
+            self.queuedFrames -= frames
+            self.availableBuffers.append(buffer)
+            self.lastOutputProgress = .now()
         }
-        guard status == noErr, let newOutput else { return false }
-        output = newOutput
+        guard let nextOutput else { return false }
+        output = nextOutput
         for _ in 0..<8 {
             var buffer: AudioQueueBufferRef?
             let capacity = UInt32(max(Self.bufferFrames, Self.maxCushionFrames) * Self.bytesPerFrame)
-            guard AudioQueueAllocateBuffer(newOutput, capacity, &buffer) == noErr, let buffer else { return false }
+            guard AudioQueueAllocateBuffer(nextOutput.reference, capacity, &buffer) == noErr, let buffer else { return false }
             availableBuffers.append(buffer)
         }
         return true
@@ -267,8 +309,10 @@ final class AudioPlayer {
 
     private func tearDown() {
         outputGeneration &+= 1
-        if let output { AudioQueueDispose(output, true) }
+        let previous = output
         output = nil
+        // A failed dispose must not open more queues or release a context the OS may still use.
+        if let previous, !previous.dispose() { canStartOutput = false }
         outputStarted = false
         availableBuffers.removeAll()
         scheduledBuffers.removeAll()
