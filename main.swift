@@ -8,6 +8,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     private var viewing: StudioViewer?
     private let receiverMode = ReceiverMode()
     private var receiverRetry: DispatchWorkItem?
+    private var receiverWakeObserver: NSObjectProtocol?
     private var receiverDelay = 2.0
     private var receiverMayQuit = false
     private var hostRetry: DispatchWorkItem?
@@ -171,6 +172,9 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         } else {
             statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshViewerState() }
             refreshViewerState()
+            receiverWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in self?.resumeReceiverAfterWake() }
         }
         NSApp.activate(ignoringOtherApps: true)
         receiverMode.onExit = { [weak self] in self?.leaveReceiver() }
@@ -402,6 +406,7 @@ final class StudioApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let observer = receiverWakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         viewing?.stop()
         hostRetry?.cancel()
         closeSending()
@@ -1853,6 +1858,18 @@ final class StudioApp: NSObject, NSApplicationDelegate {
         installUpdate.isHidden = receivedUpdate == nil
         viewerStatus.stringValue = message
         fitWindow()
+    }
+
+    private func resumeReceiverAfterWake() {
+        guard receiverMode.isActive, !installingReceiverUpdate, !receiverMayQuit else { return }
+        receiverDelay = 2
+        if let viewing {
+            viewing.reconnectAfterWake()
+        } else if let retry = receiverRetry {
+            retry.cancel()
+            receiverRetry = nil
+            beginViewing()
+        }
     }
 
     private func viewerStopped() {

@@ -18,6 +18,7 @@ final class StudioViewer {
     private var receiptWork: DispatchWorkItem?
     private var nextMotionReceipt = DispatchTime(uptimeNanoseconds: 0)
     private var heartbeatSentMS: UInt64?
+    private var lastHeartbeatReply: DispatchTime?
     private var heartbeatWatch: DispatchWorkItem?
     private var connectionDelayed = false
 
@@ -126,6 +127,7 @@ final class StudioViewer {
             }
             let connected = self.sawScreens || (self.onUpdateVersion != nil && self.acceptsUpdates)
             let startupTimeout: TimeInterval = self.onUpdateVersion == nil ? 24 : 16
+            guard self.checkHeartbeat(), self.recoverIdleVideo() else { return }
             if Date().timeIntervalSince(self.lastSeen) > (connected ? 12 : (self.waitingForApproval ? 82 : startupTimeout)) {
                 self.relayFailed(L("보내는 맥에서 응답이 없어요. 인터넷 연결을 확인하고, 보내는 맥이 보내기 중인지 살펴보세요.", "No response from the host Mac. Check your internet and make sure the host Mac is sharing."))
             } else if connected {
@@ -136,6 +138,19 @@ final class StudioViewer {
         }
         self.timer = timer
         timer.resume()
+    }
+
+    func reconnectAfterWake() {
+        guard sawScreens, updateDownload == nil else { return }
+        stop(L("잠자기에서 깨어났어요.", "This Mac woke from sleep."))
+    }
+
+    @discardableResult
+    func checkHeartbeat(now: DispatchTime = .now()) -> Bool {
+        guard let lastHeartbeatReply, now >= lastHeartbeatReply + .seconds(12),
+              updateDownload == nil else { return true }
+        relayFailed(L("연결 확인에 응답이 없어요.", "The host stopped replying to connection checks."))
+        return false
     }
 
     func sendHeartbeat() {
@@ -403,6 +418,7 @@ final class StudioViewer {
         heartbeatWatch?.cancel()
         heartbeatWatch = nil
         heartbeatSentMS = nil
+        lastHeartbeatReply = nil
         setConnectionDelayed(false)
         feedbackWork?.cancel()
         feedbackWork = nil
@@ -462,6 +478,7 @@ final class StudioViewer {
                 stop(L("보내는 맥의 화면 정보를 읽지 못했어요. 다시 연결해 주세요.", "Couldn't read the host Mac's screen info. Please connect again.")); return
             }
             sawScreens = true
+            lastHeartbeatReply = .now()
             loginReconnectUntil = nil
             reportAvailable = displays.allSatisfy { $0.receiverDiagnostics == true }
             for display in displays where display.videoFeedback == true {
@@ -544,6 +561,7 @@ final class StudioViewer {
             recordVideo(id: id, count: data.count, needsKeyframe: view?.needsVideoKeyframe == true)
             if let view = view, let sample = sample { onVideoSample?(view, sample) }
         case .keepAlive:
+            if data.isEmpty && sawScreens { lastHeartbeatReply = .now() }
             if data.count == 8 {
                 let first = data.number(at: 0)
                 let second = data.number(at: 4)
@@ -554,7 +572,10 @@ final class StudioViewer {
                     let now = DispatchTime.now().uptimeNanoseconds / 1_000_000
                     guard now >= stamp else { return }
                     let delay = now - stamp
-                    if delay <= 10_000 { roundTripMS = Int(delay) }
+                    if delay <= 10_000 {
+                        roundTripMS = Int(delay)
+                        if sawScreens { lastHeartbeatReply = .now() }
+                    }
                     if heartbeatSentMS == stamp {
                         heartbeatWatch?.cancel()
                         heartbeatWatch = nil
@@ -632,6 +653,24 @@ final class StudioViewer {
         if !needsKeyframe { receipt.requests = 0; receipt.lastRequestMS = nil }
         receipts[id] = receipt
         scheduleFeedback()
+    }
+
+    private func recoverIdleVideo() -> Bool {
+        let now = DispatchTime.now().uptimeNanoseconds / 1_000_000
+        var needsFeedback = false
+        for (id, view) in views {
+            guard var receipt = receipts[id], view.checkVideoDecoder() else { continue }
+            if receipt.requests >= 6, let requested = receipt.lastRequestMS, now - requested >= 2_000,
+               updateDownload == nil {
+                relayFailed(L("원격 화면 표시를 복구하지 못했어요.", "The remote display could not recover."))
+                return false
+            }
+            receipt.needsKeyframe = true
+            receipts[id] = receipt
+            needsFeedback = true
+        }
+        if needsFeedback { scheduleFeedback() }
+        return true
     }
 
     private func scheduleFeedback() {
@@ -1035,6 +1074,16 @@ final class RemoteView: NSView {
         }
     }
 
+    @discardableResult
+    func checkVideoDecoder() -> Bool {
+        if image.status == .failed || image.requiresFlushToResumeDecoding || busyRenderFrames >= 3 {
+            image.flush()
+            waitingForKeyFrame = true
+            busyRenderFrames = 0
+        }
+        return needsVideoKeyframe
+    }
+
     func frame(_ data: Data) -> CMSampleBuffer? {
         receivedFrames += 1
         guard data.count > 1, let format = format else { return nil }
@@ -1042,11 +1091,7 @@ final class RemoteView: NSView {
         if image.isReadyForMoreMediaData { busyRenderFrames = 0 }
         else if !waitingForKeyFrame { busyRenderFrames += 1 }
         // A short burst can temporarily fill the renderer without breaking the H.264 chain.
-        if image.status == .failed || image.requiresFlushToResumeDecoding || busyRenderFrames >= 3 {
-            image.flush()
-            waitingForKeyFrame = true
-            busyRenderFrames = 0
-        }
+        checkVideoDecoder()
         guard sync || !waitingForKeyFrame else { return nil }
         let size = data.count - 1
         var block: CMBlockBuffer?

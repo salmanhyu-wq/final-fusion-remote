@@ -1,3 +1,4 @@
+import AudioToolbox
 import AVFoundation
 import CoreAudio
 import CoreMedia
@@ -112,25 +113,36 @@ final class AudioPlayer {
     private static let cushionFrames = Int(SessionAudio.sampleRate * 0.04)
     private static let maxCushionFrames = Int(SessionAudio.sampleRate * 0.10)
     private static let lateFrames = Int(SessionAudio.sampleRate * 0.08)
+    private static let bufferFrames = 4096
+    private static let bytesPerFrame = SessionAudio.channels * MemoryLayout<Float>.stride
+    private static let callbackQueue = DispatchQueue(label: "studio-remote.audio-output")
     static var isAvailable: Bool { AudioDecoder().isAvailable }
+
     private let queue = DispatchQueue(label: "studio-remote.audio-play", qos: .userInteractive)
     private let admission = NSLock()
     private var queuedPackets = 0
     private var acceptingPackets = true
     private let decoder = AudioDecoder()
     private let onDecoded: ((AVAudioPCMBuffer) -> Void)?
-    private var engine: AVAudioEngine?
-    private var node: AVAudioPlayerNode?
-    private var observer: NSObjectProtocol?
+    private var output: AudioQueueRef?
+    private var outputGeneration: UInt64 = 0
+    private var outputStarted = false
+    private var availableBuffers: [AudioQueueBufferRef] = []
+    private var scheduledBuffers: [AudioQueueBufferRef: Int] = [:]
     private var queuedFrames = 0
+    private var lastOutputProgress = DispatchTime.now()
+    private var nextOutputAttempt = DispatchTime(uptimeNanoseconds: 0)
     private var cushion = AudioPlayer.cushionFrames
-    private var started = false
+    private var played = false
     private var expected: UInt32?
-    private var stopped = false
 
     /// A test passes onDecoded to receive the sound instead of playing it.
     init(onDecoded: ((AVAudioPCMBuffer) -> Void)? = nil) {
         self.onDecoded = onDecoded
+    }
+
+    deinit {
+        if let output { AudioQueueDispose(output, true) }
     }
 
     func receive(_ packet: Data, number: UInt32) {
@@ -145,76 +157,124 @@ final class AudioPlayer {
                 queuedPackets -= 1
                 admission.unlock()
             }
-            guard !stopped else { return }
+            admission.lock()
+            let accepting = acceptingPackets
+            admission.unlock()
+            guard accepting else { return }
             // The host restarts numbering with a fresh encoder.
             if let expected = expected, number != expected { decoder.reset() }
             expected = number &+ 1
             guard let buffer = decoder.decode(packet) else { return }
-            if let onDecoded = onDecoded {
+            if let onDecoded {
                 onDecoded(buffer)
-                return
+            } else {
+                play(buffer)
             }
-            guard let node = playbackNode() else { return }
-            if queuedFrames <= 0 {
-                // Ran dry: the network stuttered, so wait a little longer this time.
-                if started { cushion = min(Self.maxCushionFrames, cushion + SessionAudio.packetFrames) }
-                started = true
-                if let silence = AVAudioPCMBuffer(pcmFormat: SessionAudio.pcm, frameCapacity: AVAudioFrameCount(cushion)) {
-                    silence.frameLength = AVAudioFrameCount(cushion)
-                    schedule(silence, on: node)
-                }
-            } else if queuedFrames > cushion + Self.lateFrames {
-                return
-            }
-            schedule(buffer, on: node)
-        }
-    }
-
-    private func schedule(_ buffer: AVAudioPCMBuffer, on node: AVAudioPlayerNode) {
-        let frames = Int(buffer.frameLength)
-        queuedFrames += frames
-        node.scheduleBuffer(buffer) { [weak self] in
-            self?.queue.async { self?.queuedFrames -= frames }
         }
     }
 
     func stop() {
         admission.lock()
+        let wasAccepting = acceptingPackets
         acceptingPackets = false
         admission.unlock()
-        queue.async { [self] in
-            stopped = true
+        guard wasAccepting else { return }
+        queue.async { [self] in tearDown() }
+    }
+
+    private func play(_ buffer: AVAudioPCMBuffer) {
+        let now = DispatchTime.now()
+        // An output device can disappear without draining its last buffers.
+        if queuedFrames > 0 && now >= lastOutputProgress + .milliseconds(500) {
             tearDown()
+        }
+        guard now >= nextOutputAttempt else { return }
+        let frames = Int(buffer.frameLength)
+        guard (1...Self.bufferFrames).contains(frames), let channels = buffer.floatChannelData else { return }
+        if output == nil && !makeOutput() {
+            outputFailed()
+            return
+        }
+        guard let output else { return }
+        guard queuedFrames <= cushion + Self.lateFrames else { return }
+        if queuedFrames == 0 {
+            lastOutputProgress = now
+            if played { cushion = min(Self.maxCushionFrames, cushion + SessionAudio.packetFrames) }
+            guard enqueue(on: output, frames: cushion, channels: nil) else { outputFailed(); return }
+        }
+        guard !availableBuffers.isEmpty else { return }
+        guard enqueue(on: output, frames: frames, channels: channels) else { outputFailed(); return }
+        if !outputStarted {
+            guard AudioQueueStart(output, nil) == noErr else { outputFailed(); return }
+            outputStarted = true
+            played = true
         }
     }
 
-    private func playbackNode() -> AVAudioPlayerNode? {
-        if let node = node, engine?.isRunning == true { return node }
-        tearDown()
-        let engine = AVAudioEngine()
-        let node = AVAudioPlayerNode()
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: SessionAudio.pcm)
-        do { try engine.start() } catch { return nil }
-        node.play()
-        // Headphones or another output device replace the engine's hardware format.
-        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
-                                                          queue: nil) { [weak self] _ in
-            self?.queue.async { self?.tearDown() }
+    private func makeOutput() -> Bool {
+        var format = AudioStreamBasicDescription(
+            mSampleRate: SessionAudio.sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian,
+            mBytesPerPacket: UInt32(Self.bytesPerFrame), mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(Self.bytesPerFrame), mChannelsPerFrame: UInt32(SessionAudio.channels),
+            mBitsPerChannel: 32, mReserved: 0)
+        let generation = outputGeneration
+        let playbackQueue = queue
+        var newOutput: AudioQueueRef?
+        // Keep completion delivery separate so disposing on the playback queue cannot wait on itself.
+        let status = AudioQueueNewOutputWithDispatchQueue(&newOutput, &format, 0, Self.callbackQueue) { [weak self] _, buffer in
+            playbackQueue.async { [weak self] in
+                guard let self, self.outputGeneration == generation,
+                      let frames = self.scheduledBuffers.removeValue(forKey: buffer) else { return }
+                self.queuedFrames -= frames
+                self.availableBuffers.append(buffer)
+                self.lastOutputProgress = .now()
+            }
         }
-        self.engine = engine
-        self.node = node
-        return node
+        guard status == noErr, let newOutput else { return false }
+        output = newOutput
+        for _ in 0..<8 {
+            var buffer: AudioQueueBufferRef?
+            let capacity = UInt32(max(Self.bufferFrames, Self.maxCushionFrames) * Self.bytesPerFrame)
+            guard AudioQueueAllocateBuffer(newOutput, capacity, &buffer) == noErr, let buffer else { return false }
+            availableBuffers.append(buffer)
+        }
+        return true
+    }
+
+    private func enqueue(on output: AudioQueueRef, frames: Int, channels: UnsafePointer<UnsafeMutablePointer<Float>>?) -> Bool {
+        guard let buffer = availableBuffers.popLast() else { return false }
+        let destination = buffer.pointee.mAudioData.assumingMemoryBound(to: Float.self)
+        if let channels {
+            for frame in 0..<frames {
+                destination[2 * frame] = channels[0][frame]
+                destination[2 * frame + 1] = channels[1][frame]
+            }
+        } else {
+            destination.initialize(repeating: 0, count: frames * SessionAudio.channels)
+        }
+        buffer.pointee.mAudioDataByteSize = UInt32(frames * Self.bytesPerFrame)
+        guard AudioQueueEnqueueBuffer(output, buffer, 0, nil) == noErr else { return false }
+        queuedFrames += frames
+        scheduledBuffers[buffer] = frames
+        return true
+    }
+
+    private func outputFailed() {
+        tearDown()
+        nextOutputAttempt = .now() + .seconds(1)
     }
 
     private func tearDown() {
-        if let observer = observer { NotificationCenter.default.removeObserver(observer) }
-        observer = nil
-        node?.stop()
-        engine?.stop()
-        node = nil
-        engine = nil
+        outputGeneration &+= 1
+        if let output { AudioQueueDispose(output, true) }
+        output = nil
+        outputStarted = false
+        availableBuffers.removeAll()
+        scheduledBuffers.removeAll()
         queuedFrames = 0
+        cushion = Self.cushionFrames
+        played = false
     }
 }
 

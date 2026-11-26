@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import os
 import ServiceManagement
 
 final class ReceiverMode {
@@ -14,6 +15,7 @@ final class ReceiverMode {
     private var previousStatus = ""
     private var previousActivity: OperationActivity = .idle
     private var activity: NSObjectProtocol?
+    private var mainThreadMonitor: ReceiverMainThreadMonitor?
     private var builtInTrackpad: BuiltInTrackpad?
     private weak var trackpadView: RemoteView?
     private var trackpadSequence = false
@@ -32,9 +34,10 @@ final class ReceiverMode {
     func enter() {
         guard !isActive else { return }
         isActive = true
+        mainThreadMonitor = ReceiverMainThreadMonitor()
         previousPresentation = NSApp.presentationOptions
         NSApp.presentationOptions = [.hideDock, .hideMenuBar, .disableAppleMenu,
-                                      .disableProcessSwitching, .disableForceQuit, .disableHideApplication]
+                                      .disableProcessSwitching, .disableHideApplication]
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .idleDisplaySleepDisabled], reason: ProductName.macReceiver)
         let center = NotificationCenter.default
@@ -66,6 +69,7 @@ final class ReceiverMode {
     func leave() {
         guard isActive else { return }
         isActive = false
+        mainThreadMonitor = nil
         SymbolicHotKeys.restore(hotKeyToken)
         hotKeyToken = nil
         stopTrackpad()
@@ -88,7 +92,7 @@ final class ReceiverMode {
 
     func display(_ views: [RemoteView]) {
         self.views = views
-        if views.isEmpty { stopTrackpad() }
+        if views.isEmpty { resetTrackpadGesture() }
         guard isActive else { return }
         layout()
         if !views.isEmpty && builtInTrackpad == nil {
@@ -101,6 +105,10 @@ final class ReceiverMode {
     private func stopTrackpad() {
         builtInTrackpad?.stop()
         builtInTrackpad = nil
+        resetTrackpadGesture()
+    }
+
+    private func resetTrackpadGesture() {
         trackpadView?.cancelBuiltInTrackpadGesture()
         trackpadView = nil
         trackpadSequence = false
@@ -113,7 +121,7 @@ final class ReceiverMode {
             trackpadSequence = false
             return
         }
-        guard isActive, NSApp.isActive else {
+        guard isActive, NSApp.isActive, !views.isEmpty else {
             trackpadView?.cancelBuiltInTrackpadGesture()
             trackpadView = nil
             trackpadSequence = true
@@ -171,6 +179,10 @@ final class ReceiverMode {
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
+        let modifiers: NSEvent.ModifierFlags = [.control, .option, .command, .shift]
+        if event.keyCode == UInt16(kVK_Escape), event.modifierFlags.intersection(modifiers) == [.option, .command] {
+            return false
+        }
         if event.type == .flagsChanged && event.keyCode == UInt16(kVK_Function) {
             fnDown = event.modifierFlags.contains(.function)
         }
@@ -219,6 +231,45 @@ final class ReceiverMode {
             CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
             CGEvent.tapEnable(tap: eventTap, enable: true)
             break
+        }
+    }
+}
+
+/// Reports a blocked UI even when its normal session timers cannot run.
+private final class ReceiverMainThreadMonitor {
+    private let queue = DispatchQueue(label: "studio-remote.receiver-health", qos: .utility)
+    private let timer: DispatchSourceTimer
+    private let logger = Logger(subsystem: "app.finalfusion.remote.receiver", category: "Responsiveness")
+    private var pendingSince: DispatchTime?
+    private var reported = false
+
+    init() {
+        timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2), leeway: .milliseconds(200))
+        timer.setEventHandler { [weak self] in self?.probe() }
+        timer.resume()
+    }
+
+    deinit { timer.cancel() }
+
+    private func probe() {
+        let now = DispatchTime.now()
+        if let pendingSince {
+            if !reported && now >= pendingSince + .seconds(6) {
+                reported = true
+                logger.error("Receiver main thread has not responded for at least six seconds.")
+            }
+            return
+        }
+
+        pendingSince = now
+        DispatchQueue.main.async { [weak self] in
+            self?.queue.async { [weak self] in
+                guard let self else { return }
+                if self.reported { self.logger.notice("Receiver main thread responded again.") }
+                self.pendingSince = nil
+                self.reported = false
+            }
         }
     }
 }

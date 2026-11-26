@@ -945,7 +945,34 @@ private func testSharedClipboard() {
     wait(8) { received().count == 1 }
     require(received().first.flatMap { try? Data(contentsOf: $0) } == contents,
             "a file copied on the host can be pasted on the viewer")
+    var woke = false
+    viewer.onStopped = { woke = true }
+    viewer.reconnectAfterWake()
+    require(woke, "wake closes the established viewer and asks the app to reconnect")
+    wait(2) { host.activeDisplayCount == 0 }
+    require(host.activeDisplayCount == 0, "wake releases the old host capture")
     print("PASS: clipboards are shared only with viewers that ask, in both directions, with text and files")
+    print("PASS: wake releases the established session for a fresh connection")
+
+    let recovered = StudioViewer(receiverMode: mode) { _ in }
+    recovered.playsAudio = false
+    recovered.sharesClipboard = false
+    recovered.matchInputSource = false
+    var reconnected = false
+    var timedOut = false
+    recovered.onConnected = { reconnected = true }
+    recovered.onStopped = { timedOut = true }
+    defer { recovered.stop() }
+    recovered.receive(on: Wire(NWConnection(to: .unix(path: localSocket!), using: .tcp), queue: .main), greeting: greeting)
+    wait(5) { reconnected }
+    require(reconnected, "receiver can connect again after wake tears down the old session")
+    recovered.sendHeartbeat()
+    wait(1) { recovered.roundTripMS != nil }
+    require(recovered.roundTripMS != nil && recovered.checkHeartbeat(),
+            "a still screen remains connected while health checks are answered")
+    require(!recovered.checkHeartbeat(now: .now() + .seconds(13)) && timedOut,
+            "an established receiver retries when health checks are unanswered")
+    print("PASS: wake reconnects and missing heartbeats recover even when the screen stays on")
 }
 
 private let screenTestPoints = [
